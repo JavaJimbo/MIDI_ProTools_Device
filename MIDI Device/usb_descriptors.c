@@ -173,7 +173,7 @@ ROM USB_DEVICE_DESCRIPTOR device_dsc=
     0x00,                   // Protocol code
     USB_EP0_BUFF_SIZE,          // Max packet size for EP0, see usb_config.h
     0x04D8,                 // Vendor ID
-    0x0059,                 // Product ID: Audio MIDI example
+    0x0059,                 // Product ID: Audio MIDI demo  For DEV 1: use 59; For DEV 2: use 62 $$$$ 
     0x0002,                 // Device release number in BCD format
     0x01,                   // Manufacturer string index
     0x02,                   // Product string index

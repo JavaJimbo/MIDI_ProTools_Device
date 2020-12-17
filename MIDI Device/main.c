@@ -19,10 +19,19 @@
  * 12-5-20:     Recompiled and tested with ProTools.
  * 12-6-20:     Modified to send MIDI data for one servo motor on XBEE Uart.
  *              Works with PIC795_MD13S_Controller recording and playing back on XBEE at 57600 baud.
+ *              ROM USB_DEVICE_DESCRIPTOR 0x04D8, // Vendor ID   0x0059, // Product ID: Audio MIDI example
+ * 12-15-20:    ADDED TEN ANALOG SLIDER POTS: B0,B1,B3,B4,B5,B8,B9,B10,B11,B12
+ * 12-16-20:    Debugged & added USBrunning flag.
+ * 12-16-20:    Works now with multiple sevos recording and playing back on ProTools.
  ************************************************************************************************************/
 
 #ifndef MAIN_C
 #define MAIN_C
+#define TEST_OUT LATEbits.LATE4
+#define ENTER 13
+#define CR ENTER
+#define BACKSPACE 8
+
 
 #define	STX '>'
 #define	DLE '/'
@@ -88,10 +97,11 @@ USB_AUDIO_MIDI_EVENT_PACKET midiData MIDI_EVENT_ADDRESS_TAG;
 USB_HANDLE USBTxHandle = 0;
 USB_HANDLE USBRxHandle = 0;
 
-/** PRIVATE PROTOTYPES *********************************************/
+
+int ADC10_ManualInit(void);
 void BlinkUSBStatus(void);
 static void InitializeSystem(void);
-void ProcessUSB(void);
+unsigned char ProcessUSB(void);
 void UserInit(void);
 void YourHighPriorityISRCode();
 void YourLowPriorityISRCode();
@@ -115,7 +125,7 @@ extern unsigned short CalculateModbusCRC(unsigned char *input_str, short num_byt
 //#define DMXbits U5STAbits
 //#define DMX_VECTOR _UART_5_VECTOR
 
-#define MAXBUFFER 128
+#define MAXBUFFER 256
 unsigned char HOSTRxBuffer[MAXBUFFER];
 unsigned char HOSTRxBufferFull = false;
 
@@ -125,7 +135,7 @@ unsigned char XBEERxBuffer[MAXBUFFER];
 unsigned short XBEETxLength = 0;
 unsigned short XBEETxIndex = 0;
 unsigned char XBEETxBuffer[MAXBUFFER];
-
+short outData[MAXBUFFER];
 
 unsigned short MIDITxLength = 0;
 unsigned short MIDITxIndex = 0;
@@ -140,12 +150,13 @@ unsigned char DMXflag = false;
 static unsigned char DMXstate = DMX_STANDBY;
 */
 
-#define MAXPOTS 1
-unsigned short ADresult[MAXPOTS]; // read the result of channel 0 conversion from the idle buffer
+#define MAXPOTS 10
+unsigned short ADresult[MAXPOTS];
+unsigned short ADpots[MAXPOTS];
 
 void ConfigAd(void);
 
-unsigned short milliSecondCounter = 0;
+// unsigned short milliSecondCounter = 0;
 
 
 #define SET_DISPLAY 4 // CTL-D
@@ -166,7 +177,7 @@ struct servoType {
 };
 
 unsigned short MIDIStateMachine(void);
-short MIDItimeout = 0;
+// short MIDItimeout = 0;
 unsigned char MIDIbufferFull = false;
 
 #define MIDI_TIMEOUT 2
@@ -177,43 +188,77 @@ unsigned char MIDIbufferFull = false;
 #define MIDI_MODE 3
 #define TEST_MODE 4
 
-unsigned char servoNumber = 3;
+
 const unsigned char MIDIpercussionCommand[7] = {0xB0, 0x00, 0x7F, 0x20, 0x00, 0xC0, 0x00};
 unsigned short MIDInoteTimeout = 0;
-unsigned short tenthSecondTimeout = 0;
 
 unsigned char ADint = false;
 #define FILTERSIZE 16
-long arrServoValue[FILTERSIZE];
-long servoValue = 0, servoLow = 0, servoHigh = 0;
+long arrPotValue[MAXPOTS][FILTERSIZE];
+unsigned char arrPotEnable[MAXPOTS];
+#define MAXSERVOS MAXPOTS
+long arrServoValue[MAXSERVOS];
+unsigned char arrServoDataReady[MAXSERVOS];
+long servoLow = 0, servoHigh = 0;
 
 enum {
-    IDLE = 0,
+    IDLE = 0,    
     SEND_LOW,
     SEND_HI
 };
-unsigned char MIDIState = IDLE;
-unsigned char controlCommand = 0x0;
 
-unsigned short outData[MAXBUFFER];
+unsigned char MIDIState[MAXSERVOS];
+unsigned char setupCommand = 0, controlCommand = 0x00;
 
+
+// ADresult
+// ADpots
+
+void SortPots()
+{
+    ADpots[0] = ADresult[6];
+    ADpots[1] = ADresult[5];
+    ADpots[2] = ADresult[4];
+    ADpots[3] = ADresult[9];
+    ADpots[4] = ADresult[3];
+    ADpots[5] = ADresult[2];
+    ADpots[6] = ADresult[1];
+    ADpots[7] = ADresult[0];
+    ADpots[8] = ADresult[7];
+    ADpots[9] = ADresult[8];
+}
+
+#define ENABLE_POTS 16
+unsigned char USBrunning = false;
 int main(void) 
 {
-    unsigned char UserButtonState = 1, ButtonRead;
-    short i, UserButtonDebouncer = 0;    
+    unsigned char UserButtonState = 1, ButtonRead, ch = 0;
+    short i, j, k, UserButtonDebouncer = 0;    
     unsigned char TestEnable = false;
-    short trialNum = 0;
-    short length;
     short filterIndex = 0;
     long averageValue = 0;
     long sumValue;    
-    unsigned char ch, textXBEE[MAXBUFFER];    
+    unsigned char command, subCommand;
     
-    for (i = 0; i < FILTERSIZE; i++) arrServoValue[i] = 0x0000;
+    for (i = 0; i < MAXPOTS; i++)
+    {        
+        for (j = 0; j < FILTERSIZE; j++) 
+            arrPotValue[i][j] = 0x0000;
+    }
+    
+    for (i = 0; i < MAXSERVOS; i++)
+    {
+        arrServoValue[i] = 0x0000;
+        arrPotEnable[i] = false;
+        MIDIState[i] = IDLE;
+    }
+    
     
     InitializeSystem();
+    
     DelayMs(200);
-    printf("\r\rTesting USB SEND and RECEIVE with XBEE transmit #1\r\r");
+
+    printf("\r\rTESTING NO USB MODE #1\r\r");
 
     mLED_1_Off();
     mLED_2_Off();
@@ -222,45 +267,91 @@ int main(void)
     
     while (1) 
     {
-        if (TestEnable && !MIDIState && ADint && !MIDITxLength) 
+        if (controlCommand)
+        {
+            printf("\rCONTROL COMMAND %d: ", controlCommand);
+            if (controlCommand == ENABLE_POTS) 
+            {
+                printf("ENABLE POTS: ");
+                setupCommand = ENABLE_POTS;
+            }
+            else if (controlCommand == 17 || controlCommand == 24 || controlCommand == 3)
+            {
+                printf("CANCEL COMMAND");
+                setupCommand = 0;
+            }
+            controlCommand = 0;
+        }
+        if (ADint) 
         {
             ADint = false;
             
-            if (filterIndex >= FILTERSIZE) filterIndex = 0;
-            arrServoValue[filterIndex++] = ADresult[0];
+            IFS1bits.AD1IF = 0;
+            while(!IFS1bits.AD1IF);        
+            AD1CON1bits.ASAM = 0;        // Pause sampling. 
+            for (i = 0; i < MAXPOTS; i++)
+                ADresult[i] = (unsigned short) ReadADC10(i); // read the result of channel 0 conversion from the idle buffer
+            AD1CON1bits.ASAM = 1;        // Restart sampling.s            
+            SortPots();
+            //printf("\r#%d:", trialNum++);
+            //for (i = 0; i < MAXPOTS; i++) printf(" %d,", ADpots[i]);                        
             
-            sumValue = 0;
-            for (i = 0; i < FILTERSIZE; i++) sumValue = sumValue + (long)arrServoValue[i];
-            averageValue = sumValue / FILTERSIZE;
-            
-            if (abs(averageValue - servoValue) > 1)
-            {       
-                servoValue = averageValue;
-                if (servoValue >= 1023) servoValue = 1023;
-                servoHigh = (servoValue / 32) | 0b01000000;
-                servoLow = (servoValue - (servoHigh * 32));
-                
-                MIDITxBuffer[0] = 0xC0;            
-                MIDITxBuffer[1] = servoNumber;
-                MIDITxBuffer[2] = (unsigned char) servoLow;
-                
-                MIDITxBuffer[3] = 0xC0;            
-                MIDITxBuffer[4] = servoNumber;
-                MIDITxBuffer[5] = (unsigned char) servoHigh;                
-                                        
-                MIDIState++;          
-            
-                while (!UARTTransmitterIsReady(MIDIuart));                
-                UARTSendDataByte(MIDIuart, MIDITxBuffer[0]);
-                printf("\r#%d %02X %02X %02X %02X %02X %02X", trialNum++, MIDITxBuffer[0], MIDITxBuffer[1], MIDITxBuffer[2], MIDITxBuffer[3], MIDITxBuffer[4], MIDITxBuffer[5]);
-                MIDITxLength = 6;
-                MIDITxIndex = 1;
-                INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_ENABLED);                   
+            // printf("\r#%d: ", trialNum++);
+            for (i = 0; i < MAXPOTS; i++)
+            {
+                arrPotValue[i][filterIndex] = ADpots[i];
+                //sumValue = 0;
+                //for (j = 0; j < FILTERSIZE; j++) 
+                //    sumValue = sumValue + (long)arrPotValue[i][j];
+                //averageValue = sumValue / FILTERSIZE;
+                //printf("%i, ", averageValue);
             }
-            mAD1IntEnable(INT_ENABLED);
+            filterIndex++;
+            if (filterIndex >= FILTERSIZE) filterIndex = 0;            
+                        
+            for (i = 0; i < MAXPOTS; i++)
+            {         
+                if (arrPotEnable[i])
+                {
+                    sumValue = 0;
+                    for (j = 0; j < FILTERSIZE; j++) 
+                        sumValue = sumValue + (long)arrPotValue[i][j];
+                    averageValue = sumValue / FILTERSIZE;                
+                    if (abs(averageValue - arrServoValue[i]) > 1)
+                    {                               
+                        arrServoDataReady[i] = true;
+                        if (averageValue >= 1023) averageValue = 1023;                    
+                        arrServoValue[i] = averageValue;
+                    
+                        servoHigh = (averageValue / 32) | 0b01000000;
+                        servoLow = (averageValue - (servoHigh * 32));
+
+                        if (TestEnable) printf("\r>>#%d: %i, ", i, averageValue);
+                        
+                        if (!USBrunning)
+                        {
+                            outData[0] = averageValue; 
+                            command = 0xB0;
+                            subCommand = i;                                    
+                            XBEETxLength = BuildPacket(command, subCommand, 1, outData, XBEETxBuffer);
+                            while(!UARTTransmitterIsReady(XBEEuart));
+                            UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
+                            XBEETxIndex = 1;
+                            INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);                                                        
+                        }                        
+                        else if (!MIDIState[i])
+                        {                            
+                            k = i * 2;
+                            MIDITxBuffer[k+0] = (unsigned char) servoLow;
+                            MIDITxBuffer[k+1] = (unsigned char) servoHigh;                                        
+                            MIDIState[i] = SEND_LOW;                               
+                        }                        
+                    }
+                }
+            }            
         }
         
-        MIDIStateMachine(); // Check MIOI UART for incoming data
+        // MIDIStateMachine(); // Check MIOI UART for incoming data
         
 #define USER_PUSHBUTTON PORTEbits.RE6
 #define PROGRAM_PUSHBUTTON PORTEbits.RE7        
@@ -298,6 +389,27 @@ int main(void)
         {
             HOSTRxBufferFull = false;
             printf("\rRECEIVED: %s", HOSTRxBuffer);
+            if (setupCommand == ENABLE_POTS)
+            {
+                for (i = 0; i < MAXPOTS; i++) 
+                    arrPotEnable[i] = false;
+                i = 0;
+                do {
+                    ch = HOSTRxBuffer[i];
+                    if (ch == CR) break;
+                    // if ((ch >= '0' && ch <= '9')||(ch >= 'A' && ch <= 'B'))
+                    if (ch >= '0' && ch <= '9')
+                    {
+                        if (ch <= '9') arrPotEnable[ch - '0'] = true;
+                        else arrPotEnable[ch - 'A' + 10] = true;
+                    }
+                    i++;
+                } while(i < MAXPOTS);
+                printf("\rENABLED POTS: ");
+                for (i = 0; i < MAXPOTS; i++) 
+                    if (arrPotEnable[i]) printf("\r%d, ", i);
+            }
+            setupCommand = 0;
         }
 #if defined(USB_INTERRUPT)
         USBDeviceAttach();
@@ -309,28 +421,11 @@ int main(void)
 #endif
         // Application-specific tasks.
         // Application related code may be added here, or in the ProcessUSB() function.
-        ProcessUSB();
+        USBrunning = ProcessUSB();
     }//end while
 }//end main        
 
 
-static void InitializeSystem(void) {
-    AD1PCFG = 0xFFFF;
-    SYSTEMConfigPerformance(60000000);
-
-#if defined(USE_USB_BUS_SENSE_IO)
-    tris_usb_bus_sense = INPUT_PIN; // See HardwareProfile.h
-#endif
-
-#if defined(USE_SELF_POWER_SENSE_IO)
-    tris_self_power = INPUT_PIN; // See HardwareProfile.h
-#endif
-
-    UserInit();
-
-    USBDeviceInit(); //usb_device.c.  Initializes USB module SFRs and firmware
-    //variables to known states.
-}//end InitializeSystem
 
 void BlinkUSBStatus(void) {
     static long led_count = 0;
@@ -473,50 +568,6 @@ BOOL USER_USB_CALLBACK_EVENT_HANDLER(int event, void *pdata, WORD size) {
     return true;
 }
 
-void ConfigAd(void) {
-
-    mPORTBSetPinsAnalogIn(BIT_0); // $$$$
-
-    // ---- configure and enable the ADC ----
-
-    // ensure the ADC is off before setting the configuration
-    CloseADC10();
-
-    // define setup parameters for OpenADC10
-    //                 Turn module on | ouput in integer | trigger mode auto | enable autosample
-#define PARAM1  ADC_MODULE_ON | ADC_FORMAT_INTG | ADC_CLK_AUTO | ADC_AUTO_SAMPLING_ON
-
-    // ADC ref external    | disable offset test    | enable scan mode | perform  samples | use dual buffers | use only mux A
-#define PARAM2  ADC_VREF_AVDD_AVSS | ADC_OFFSET_CAL_DISABLE | ADC_SCAN_ON | ADC_SAMPLES_PER_INT_1 | ADC_ALT_BUF_ON | ADC_ALT_INPUT_OFF
-
-    //                   use ADC internal clock | set sample time
-    // #define PARAM3  ADC_CONV_CLK_INTERNAL_RC | ADC_SAMPLE_TIME_31
-#define PARAM3  ADC_CONV_CLK_PB | ADC_SAMPLE_TIME_31 | ADC_CONV_CLK_32Tcy
-
-    //  set AN2 (A2 on Olimex 220 board) input to analog
-    // #define PARAM4    ENABLE_AN0_ANA | ENABLE_AN1_ANA| ENABLE_AN2_ANA | ENABLE_AN3_ANA
-#define PARAM4    ENABLE_AN0_ANA
-
-    // USE AN0
-#define PARAM5 SKIP_SCAN_AN1 | SKIP_SCAN_AN2 | SKIP_SCAN_AN3 |\
-SKIP_SCAN_AN4 | SKIP_SCAN_AN5 | SKIP_SCAN_AN6 | SKIP_SCAN_AN7 |\
-SKIP_SCAN_AN8 | SKIP_SCAN_AN9 | SKIP_SCAN_AN10 | SKIP_SCAN_AN11 |\
-SKIP_SCAN_AN12 | SKIP_SCAN_AN13 | SKIP_SCAN_AN14 | SKIP_SCAN_AN15
-
-    // set negative reference to Vref for Mux A
-    SetChanADC10(ADC_CH0_NEG_SAMPLEA_NVREF);
-
-    // open the ADC
-    OpenADC10(PARAM1, PARAM2, PARAM3, PARAM4, PARAM5);
-
-    ConfigIntADC10(ADC_INT_PRI_2 | ADC_INT_SUB_PRI_2 | ADC_INT_ON);
-
-    // clear the interrupt flag
-    mAD1ClearIntFlag();
-
-    // Enable the ADC
-    EnableADC10();
-}
 
 unsigned short MIDIStateMachine(void) {
     unsigned char ch;
@@ -548,26 +599,6 @@ void __ISR(_CHANGE_NOTICE_VECTOR, ipl2) ChangeNotice_Handler(void) {
 */
 
 
-
-
-void __ISR(_ADC_VECTOR, ipl6) ADHandler(void) {
-    unsigned short offSet;
-    unsigned char i;
-
-    mAD1IntEnable(INT_DISABLED);
-    mAD1ClearIntFlag();
-
-    // Determine which buffer is idle and create an offset
-    offSet = 8 * ((~ReadActiveBufferADC10() & 0x01));
-
-    for (i = 0; i < MAXPOTS; i++)
-        ADresult[i] = (unsigned short) ReadADC10(offSet + i); // read the result of channel 0 conversion from the idle buffer
-}
-
-
-
-#define ENTER 13
-#define BACKSPACE 8
 // HOST UART interrupt handler it is set at priority level 2
 
 void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
@@ -591,14 +622,15 @@ void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
                 UARTSendDataByte(HOSTuart, BACKSPACE);
                 if (HOSTRxIndex > 0) HOSTRxIndex--;
             } else if (ch == ENTER) {
-                HOSTRxBuffer[HOSTRxIndex] = '\0'; // $$$$
+                HOSTRxBuffer[HOSTRxIndex] = '\r'; // $$$$
                 HOSTRxBufferFull = true;
                 HOSTRxIndex = 0;
-            } else if (ch < 27) controlCommand = ch;
+            } else if (ch < 27) {
+                controlCommand = ch;
+                HOSTRxIndex = 0;
+            }
             else if (HOSTRxIndex < MAXBUFFER) {
                 HOSTRxBuffer[HOSTRxIndex++] = ch;
-                    HOSTRxBufferFull = true;
-                    HOSTRxIndex = 0;
             }
         }
     }
@@ -608,7 +640,7 @@ void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
 }
 
 
-
+/*
 void __ISR(MIDI_VECTOR, ipl2) IntMIDIHandler(void) 
 {    
     unsigned char ch;
@@ -646,208 +678,26 @@ void __ISR(MIDI_VECTOR, ipl2) IntMIDIHandler(void)
         } else INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_DISABLED);
     }
 }
+*/
 
-
-void __ISR(_TIMER_2_VECTOR, ipl5) Timer2Handler(void) 
+static void InitializeSystem(void) 
 {
-    static unsigned short tenthSecondTimer = 0;
+    AD1PCFG = 0xFFFF;
+    SYSTEMConfigPerformance(60000000);
 
-    mT2ClearIntFlag(); // clear the interrupt flag
+#if defined(USE_USB_BUS_SENSE_IO)
+    tris_usb_bus_sense = INPUT_PIN; // See HardwareProfile.h
+#endif
 
-    milliSecondCounter++;
+#if defined(USE_SELF_POWER_SENSE_IO)
+    tris_self_power = INPUT_PIN; // See HardwareProfile.h
+#endif
 
-    if (MIDItimeout) 
-    {
-        MIDItimeout--;
-        if (!MIDItimeout) MIDIbufferFull = true;
-    }
+    UserInit();
 
-    if (MIDInoteTimeout)
-        MIDInoteTimeout--;
-
-    if (tenthSecondTimeout)
-        tenthSecondTimeout--;
-
-    tenthSecondTimer++;
-    if (tenthSecondTimer > 10)
-    {
-        tenthSecondTimer = 0;
-        ADint = true;
-    }
-}
-
-void UserInit(void) 
-{
-    // Turn off JTAG so we get the pins back
-    mJTAGPortEnable(false);
-
-    //PORTSetPinsDigitalIn(IOPORT_C, BIT_14 | BIT_13);
-    //mCNOpen(CN_ON, CN0_ENABLE | CN1_ENABLE, CN0_PULLUP_ENABLE | CN1_PULLUP_ENABLE);
-    //ConfigIntCN(CHANGE_INT_ON | CHANGE_INT_PRI_2);
-
-    //initialize the variable holding the handle for the last
-    // transmission
-    USBTxHandle = NULL;
-    USBRxHandle = NULL;
-
-    // Set up main UART
-    UARTConfigure(HOSTuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
-    UARTSetFifoMode(HOSTuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
-    UARTSetLineControl(HOSTuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
-#define SYS_FREQ 80000000
-    UARTSetDataRate(HOSTuart, SYS_FREQ, 921600);
-    UARTEnable(HOSTuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
-
-    // Configure UART #2 Interrupts
-    INTEnable(INT_U2TX, INT_DISABLED);
-    INTEnable(INT_SOURCE_UART_RX(HOSTuart), INT_ENABLED);
-    INTSetVectorPriority(INT_VECTOR_UART(HOSTuart), INT_PRIORITY_LEVEL_2);
-    INTSetVectorSubPriority(INT_VECTOR_UART(HOSTuart), INT_SUB_PRIORITY_LEVEL_0);
-
-    
-    // Set up XBEE at 57600 baud
-    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
-    UARTSetFifoMode(XBEEuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
-    UARTSetLineControl(XBEEuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
-    UARTSetDataRate(XBEEuart, SYS_FREQ, 57600);
-    UARTEnable(XBEEuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
-
-    // Configure XBEE Interrupts
-    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
-    INTEnable(INT_SOURCE_UART_RX(XBEEuart), INT_DISABLED);
-    INTSetVectorPriority(INT_VECTOR_UART(XBEEuart), INT_PRIORITY_LEVEL_2);
-    INTSetVectorSubPriority(INT_VECTOR_UART(XBEEuart), INT_SUB_PRIORITY_LEVEL_0);
-    
-    
-    // Set up MIDI at 31250 baud
-    UARTConfigure(MIDIuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
-    UARTSetFifoMode(MIDIuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
-    UARTSetLineControl(MIDIuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
-    UARTSetDataRate(MIDIuart, SYS_FREQ, 31250);
-    UARTEnable(MIDIuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
-
-    // Configure MIDI Interrupts
-    INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_DISABLED);
-    INTEnable(INT_SOURCE_UART_RX(MIDIuart), INT_ENABLED);
-    INTSetVectorPriority(INT_VECTOR_UART(MIDIuart), INT_PRIORITY_LEVEL_2);
-    INTSetVectorSubPriority(INT_VECTOR_UART(MIDIuart), INT_SUB_PRIORITY_LEVEL_0);
-
-    /*
-    // Set up DMX512 UART @ 25000 baud   	
-    UARTConfigure(DMXuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
-    UARTSetFifoMode(DMXuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
-    UARTSetLineControl(DMXuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_2);
-    UARTSetDataRate(DMXuart, SYS_FREQ, 250000);
-    UARTEnable(DMXuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
-
-    // Configure DMX interrupts
-    INTEnable(INT_SOURCE_UART_RX(DMXuart), INT_ENABLED);
-    INTEnable(INT_SOURCE_UART_TX(DMXuart), INT_DISABLED);
-    INTSetVectorPriority(INT_VECTOR_UART(DMXuart), INT_PRIORITY_LEVEL_1);
-    INTSetVectorSubPriority(INT_VECTOR_UART(DMXuart), INT_SUB_PRIORITY_LEVEL_0);
-    */
-
-    // Set up Port E outputs:
-    PORTSetPinsDigitalOut(IOPORT_E, BIT_0 | BIT_1 | BIT_2 | BIT_3);
-    PORTSetBits(IOPORT_E, BIT_0 | BIT_1 | BIT_2 | BIT_3);
-
-    // Set up Port E outputs:
-    PORTSetPinsDigitalIn(IOPORT_E, BIT_6 | BIT_7);
-    
-
-    ConfigAd();
-
-    // Set up Timer 2 for 100 microsecond roll-over rate
-    OpenTimer2(T2_ON | T2_SOURCE_INT | T2_PS_1_64, 1250);
-    // set up the core timer interrupt with a priority of 5 and zero sub-priority
-    ConfigIntTimer2(T2_INT_ON | T2_INT_PRIOR_5);
-
-    // Turn on the interrupts
-    INTEnableSystemMultiVectoredInt();
-
-}//end UserInit
-
-
-void ProcessUSB(void) 
-{
-    static unsigned char LEDflag = false;
-    static short LEDcounter = 0;
-    static unsigned short lowServoByte = 0, highServoByte = 0;
-    short servoValue = 0;
-    unsigned char command = 0, subcommand = 0;
-    short outData[MAXBUFFER];
-    
-    if ((USBDeviceState < CONFIGURED_STATE) || (USBSuspendControl == 1)) return;
-    
-    BlinkUSBStatus();
-
-    if (!USBHandleBusy(USBRxHandle)) 
-    {
-        USBRxHandle = USBRxOnePacket(MIDI_EP, ReceivedDataBuffer, 4);
-        if ((ReceivedDataBuffer[1] & 0xF0) != 0xB0)
-            printf("\r>%02X, %02X, %02X, %02X", ReceivedDataBuffer[0], ReceivedDataBuffer[1], ReceivedDataBuffer[2], ReceivedDataBuffer[3]);
-        else {
-            if (0 == (ReceivedDataBuffer[3] & 0b01000000)) lowServoByte = (unsigned short)ReceivedDataBuffer[3];
-            else {
-                highServoByte = (unsigned short) (ReceivedDataBuffer[3] & 0b10111111);
-                highServoByte = highServoByte << 5;
-                servoValue = lowServoByte | highServoByte;
-                printf("\rServo: %d", servoValue);
-                
-                outData[0] = 0; 
-                outData[1] = servoValue;
-                outData[2] = 0; 
-                outData[3] = 0;             
-                command = 0x56;
-                subcommand = 0x78;                                    
-                XBEETxLength = BuildPacket(command, subcommand, 4, outData, XBEETxBuffer);
-                while(!UARTTransmitterIsReady(XBEEuart));
-                UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
-                XBEETxIndex = 1;
-                INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
-            }
-        }
-            
-        LEDcounter++;
-        if (LEDcounter > 10) {
-            LEDcounter = 0;
-            if (LEDflag) {
-                mLED_4_On();
-                LEDflag = false;
-                LATBbits.LATB2 = 1;
-            } else {
-                mLED_4_Off();
-                LEDflag = true;
-                LATBbits.LATB2 = 0;
-            }
-        }
-    }
-    
-    if (MIDIState && !USBHandleBusy(USBTxHandle))
-    {           
-                    midiData.Val = 0;   //must set all unused values to 0 so go ahead
-                    
-                    midiData.CableNumber = 0;
-                    midiData.CodeIndexNumber = MIDI_CIN_CONTROL_CHANGE;
-                    midiData.DATA_0 = 0xB0; 
-                    
-                    if (MIDIState == SEND_LOW) 
-                    {
-                        midiData.DATA_1 = servoNumber;
-                        midiData.DATA_2 = (BYTE)(servoLow);
-                    }
-                    else
-                    {
-                        midiData.DATA_1 = servoNumber;
-                        midiData.DATA_2 = (BYTE)(servoHigh);
-                    }
-                    USBTxHandle = USBTxOnePacket(MIDI_EP,(BYTE*)&midiData,4);
-                    MIDIState++;
-                    if (MIDIState > SEND_HI) MIDIState = IDLE;
-        
-    }
-}//end ProcessUSB    
-
+    USBDeviceInit(); //usb_device.c.  Initializes USB module SFRs and firmware
+    //variables to known states.
+}//end InitializeSystem
 
 
 short BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData, unsigned char *ptrPacket)
@@ -943,8 +793,306 @@ void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void)
     }
 }
 
+void __ISR(_TIMER_2_VECTOR, ipl5) Timer2Handler(void) 
+{
+    static unsigned short hundredthSecondTimer = 0;
+
+    mT2ClearIntFlag(); // clear the interrupt flag
+    
+    if (TEST_OUT) TEST_OUT = 0;
+    else TEST_OUT = 1;
+
+    // milliSecondCounter++;
+
+    /*
+    if (MIDItimeout) 
+    {
+        MIDItimeout--;
+        if (!MIDItimeout) MIDIbufferFull = true;
+    }
+    if (MIDInoteTimeout)
+        MIDInoteTimeout--;
+    */
+    
+    hundredthSecondTimer++;
+    if (hundredthSecondTimer > 10)
+    {
+        hundredthSecondTimer = 0;
+        ADint = true;
+    }
+}
+
+// TEN ANALOG INPUTS: B0,B1,B3,B4,B5,B8,B9,B10,B11,B12
+int ADC10_ManualInit(void)
+{
+    int i, dummy;
+    
+    AD1CON1bits.ON = 0;
+    mAD1IntEnable(INT_DISABLED);   
+    mAD1ClearIntFlag();
+    
+    AD1CON1 = 0;
+    AD1CON2 = 0;
+    AD1CON3 = 0;
+    AD1CHS  = 0;
+    AD1CSSL = 0;
+    
+    // Set each Port B pin for digital or analog
+    // Analog = 0, digital = 1
+    AD1PCFGbits.PCFG0 = 0; 
+    AD1PCFGbits.PCFG1 = 0; 
+    AD1PCFGbits.PCFG2 = 1; 
+    AD1PCFGbits.PCFG3 = 0; 
+    AD1PCFGbits.PCFG4 = 0; 
+    AD1PCFGbits.PCFG5 = 1; 
+    AD1PCFGbits.PCFG6 = 1; 
+    AD1PCFGbits.PCFG7 = 1; 
+    AD1PCFGbits.PCFG8 = 0; 
+    AD1PCFGbits.PCFG9 = 0; 
+    AD1PCFGbits.PCFG10 = 0; 
+    AD1PCFGbits.PCFG11 = 0; 
+    AD1PCFGbits.PCFG12 = 0; 
+    AD1PCFGbits.PCFG13 = 0; 
+    AD1PCFGbits.PCFG14 = 1; 
+    AD1PCFGbits.PCFG15 = 1;     
+    
+    AD1CON1bits.FORM = 000;        // 16 bit integer format.
+    AD1CON1bits.SSRC = 7;        // Auto Convert
+    AD1CON1bits.CLRASAM = 0;    // Normal operation - buffer overwritten by next conversion sequence
+    AD1CON1bits.ASAM = 0;        // Not enable Automatic sampling yet.
+    
+    AD1CON2bits.VCFG = 0;        // Reference AVdd, AVss
+    AD1CON2bits.OFFCAL = 0;        // Offset calibration disable.
+    AD1CON2bits.CSCNA = 1;        // Scan inputs for CH0+ SHA Input for Mux A input 
+    AD1CON2bits.SMPI = 0b1000;        // Interrupt after 9+1 conversion
+    AD1CON2bits.BUFM = 0;        // One 16 word buffer
+    AD1CON2bits.ALTS = 0;        // Use only Mux A
+    AD1CON2bits.SMPI =  MAXPOTS-1;    // Number of channels to sample
+    AD1CON2bits.BUFM = 0;                // Single 16-word buffer with CLRASAM.    
+    AD1CHSbits.CH0NA = 0; // Mux A Negative input from VR-
+    AD1CHSbits.CH0SA = 3; // Mux A Positive input from pin AN3
+
+    // Set conversion clock and set sampling time.
+    AD1CON3bits.ADRC = 0;        // Clock derived from peripheral bus clock
+    AD1CON3bits.SAMC = 0b11111;        // Sample time max
+    AD1CON3bits.ADCS = 0b11111111;   // Conversion time max
+
+    // TEN ANALOG INPUTS: B0,B1,B3,B4,B5,B8,B9,B10,B11,B12
+    // Select channels to scan. Scan channels = 1, Skip channels = 0
+    AD1CSSLbits.CSSL0 = 1;
+    AD1CSSLbits.CSSL1 = 1;
+    AD1CSSLbits.CSSL2 = 0;
+    AD1CSSLbits.CSSL3 = 1;
+    AD1CSSLbits.CSSL4 = 1;
+    AD1CSSLbits.CSSL5 = 0;
+    AD1CSSLbits.CSSL6 = 0;
+    AD1CSSLbits.CSSL7 = 0;
+    AD1CSSLbits.CSSL8 = 1;
+    AD1CSSLbits.CSSL9 = 1;
+    AD1CSSLbits.CSSL10 = 1;
+    AD1CSSLbits.CSSL11 = 1;
+    AD1CSSLbits.CSSL12 = 1;
+    AD1CSSLbits.CSSL13 = 1;
+    AD1CSSLbits.CSSL14 = 0;
+    AD1CSSLbits.CSSL15 = 0;
+    
+    // Make sure all buffers have been Emptied. 
+    for (i = 0; i < 16; i++) dummy = (ADC1BUF0+i*4);    
+    
+    AD1CON1bits.ASAM = 1;        // Start Automatic Sampling. 
+    AD1CON1bits.ON = 1;            // Turn on ADC.
+    return (1);
+}
+
+
+
+
+
+void UserInit(void) 
+{
+    // Turn off JTAG so we get the pins back
+    mJTAGPortEnable(false);
+
+    ADC10_ManualInit();
+    
+    //PORTSetPinsDigitalIn(IOPORT_C, BIT_14 | BIT_13);
+    //mCNOpen(CN_ON, CN0_ENABLE | CN1_ENABLE, CN0_PULLUP_ENABLE | CN1_PULLUP_ENABLE);
+    //ConfigIntCN(CHANGE_INT_ON | CHANGE_INT_PRI_2);
+
+    //initialize the variable holding the handle for the last
+    // transmission
+    USBTxHandle = NULL;
+    USBRxHandle = NULL;
+
+    // Set up main UART
+    UARTConfigure(HOSTuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTSetFifoMode(HOSTuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(HOSTuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+#define SYS_FREQ 80000000
+    UARTSetDataRate(HOSTuart, SYS_FREQ, 921600);
+    UARTEnable(HOSTuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure UART #2 Interrupts
+    INTEnable(INT_U2TX, INT_DISABLED);
+    INTEnable(INT_SOURCE_UART_RX(HOSTuart), INT_ENABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(HOSTuart), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(HOSTuart), INT_SUB_PRIORITY_LEVEL_0);
+
+    
+    // Set up XBEE at 57600 baud
+    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTSetFifoMode(XBEEuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(XBEEuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+    UARTSetDataRate(XBEEuart, SYS_FREQ, 57600);
+    UARTEnable(XBEEuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure XBEE Interrupts
+    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
+    INTEnable(INT_SOURCE_UART_RX(XBEEuart), INT_DISABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(XBEEuart), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(XBEEuart), INT_SUB_PRIORITY_LEVEL_0);
+    
+    /*    
+    // Set up MIDI at 31250 baud
+    UARTConfigure(MIDIuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTSetFifoMode(MIDIuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(MIDIuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
+    UARTSetDataRate(MIDIuart, SYS_FREQ, 31250);
+    UARTEnable(MIDIuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure MIDI Interrupts
+    INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_DISABLED);
+    INTEnable(INT_SOURCE_UART_RX(MIDIuart), INT_ENABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(MIDIuart), INT_PRIORITY_LEVEL_2);
+    INTSetVectorSubPriority(INT_VECTOR_UART(MIDIuart), INT_SUB_PRIORITY_LEVEL_0);
+    */
+    /*
+    // Set up DMX512 UART @ 25000 baud   	
+    UARTConfigure(DMXuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTSetFifoMode(DMXuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
+    UARTSetLineControl(DMXuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_2);
+    UARTSetDataRate(DMXuart, SYS_FREQ, 250000);
+    UARTEnable(DMXuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
+
+    // Configure DMX interrupts
+    INTEnable(INT_SOURCE_UART_RX(DMXuart), INT_ENABLED);
+    INTEnable(INT_SOURCE_UART_TX(DMXuart), INT_DISABLED);
+    INTSetVectorPriority(INT_VECTOR_UART(DMXuart), INT_PRIORITY_LEVEL_1);
+    INTSetVectorSubPriority(INT_VECTOR_UART(DMXuart), INT_SUB_PRIORITY_LEVEL_0);
+    */
+
+    // Set up Port E outputs:
+    PORTSetPinsDigitalOut(IOPORT_E, BIT_0 | BIT_1 | BIT_2 | BIT_3 | BIT_4);
+    PORTSetBits(IOPORT_E, BIT_0 | BIT_1 | BIT_2 | BIT_3);
+
+    // Set up Port E outputs:
+    PORTSetPinsDigitalIn(IOPORT_E, BIT_6 | BIT_7);
+
+    // Set up Timer 2 for 100 microsecond roll-over rate
+    OpenTimer2(T2_ON | T2_SOURCE_INT | T2_PS_1_64, 1250);
+    // set up the core timer interrupt with a priority of 5 and zero sub-priority
+    ConfigIntTimer2(T2_INT_ON | T2_INT_PRIOR_5);
+
+    // Turn on the interrupts
+    INTEnableSystemMultiVectoredInt();
+
+}//end UserInit
+
+unsigned char ProcessUSB(void)
+{
+    static short servoNumber = 0;
+    static unsigned char LEDflag = false;
+    static short LEDcounter = 0;
+    static unsigned short lowServoByte = 0, highServoByte = 0;
+    short servoValue = 0;
+    char command = 0, subcommand = 0, lastServo = false;
+    short k = 0;
+    
+    if ((USBDeviceState < CONFIGURED_STATE) || (USBSuspendControl == 1)) return false;
+    
+    BlinkUSBStatus();
+
+    if (!USBHandleBusy(USBRxHandle)) 
+    {
+        USBRxHandle = USBRxOnePacket(MIDI_EP, ReceivedDataBuffer, 4);
+        if ((ReceivedDataBuffer[1] & 0xF0) != 0xB0)
+            printf("\r>%02X, %02X, %02X, %02X", ReceivedDataBuffer[0], ReceivedDataBuffer[1], ReceivedDataBuffer[2], ReceivedDataBuffer[3]);
+        else {
+            if (0 == (ReceivedDataBuffer[3] & 0b01000000)) lowServoByte = (unsigned short)ReceivedDataBuffer[3];
+            else {
+                highServoByte = (unsigned short) (ReceivedDataBuffer[3] & 0b10111111);
+                highServoByte = highServoByte << 5;
+                servoValue = lowServoByte | highServoByte;
+                
+                outData[0] = servoValue; 
+                command = ReceivedDataBuffer[1];
+                subcommand = ReceivedDataBuffer[2]-1;       
+                
+                printf("\rUSB RX Servo #%d: %d", subcommand, servoValue);                
+                
+                if (subcommand >= 0)
+                {
+                    XBEETxLength = BuildPacket(command, subcommand, 1, outData, XBEETxBuffer);
+                    while(!UARTTransmitterIsReady(XBEEuart));
+                    UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
+                    XBEETxIndex = 1;
+                    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+                }
+            }
+        }
+            
+        LEDcounter++;
+        if (LEDcounter > 10) {
+            LEDcounter = 0;
+            if (LEDflag) {
+                mLED_4_On();
+                LEDflag = false;
+                LATBbits.LATB2 = 1;
+            } else {
+                mLED_4_Off();
+                LEDflag = true;
+                LATBbits.LATB2 = 0;
+            }
+        }
+    }
+    
+    lastServo = false;
+    while (!MIDIState[servoNumber])
+    {
+        servoNumber++;
+        if (servoNumber > MAXSERVOS) 
+        {            
+            servoNumber = 0;
+            if (lastServo) break;
+            else lastServo = true;
+        }
+    }
+    
+    if (MIDIState[servoNumber] && !USBHandleBusy(USBTxHandle))
+    {           
+        k = servoNumber * 2;
+        midiData.Val = 0;   //must set all unused values to 0 so go ahead
+                    
+        midiData.CableNumber = 0;
+        midiData.CodeIndexNumber = MIDI_CIN_CONTROL_CHANGE;
+        midiData.DATA_0 = 0xB0; 
+                
+        if (MIDIState[servoNumber] == SEND_LOW) 
+        {
+            midiData.DATA_1 = servoNumber+1;
+            midiData.DATA_2 = MIDITxBuffer[k+0]; // (BYTE)(servoLow);
+            MIDIState[servoNumber] = SEND_HI;
+        }
+        else
+        {
+            midiData.DATA_1 = servoNumber+1;
+            midiData.DATA_2 = MIDITxBuffer[k+1];// (BYTE)(servoHigh);
+            MIDIState[servoNumber] = IDLE;
+        }
+        USBTxHandle = USBTxOnePacket(MIDI_EP,(BYTE*)&midiData,4);
+    }    
+    return true;
+}//end ProcessUSB    
 
 /** EOF main.c *************************************************/
 #endif
-
-
