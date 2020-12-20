@@ -22,7 +22,8 @@
  *              ROM USB_DEVICE_DESCRIPTOR 0x04D8, // Vendor ID   0x0059, // Product ID: Audio MIDI example
  * 12-15-20:    ADDED TEN ANALOG SLIDER POTS: B0,B1,B3,B4,B5,B8,B9,B10,B11,B12
  * 12-16-20:    Debugged & added USBrunning flag.
- * 12-16-20:    Works now with multiple sevos recording and playing back on ProTools.
+ * 12-16-20:    Works now with multiple servos recording and playing back on ProTools.
+ * 12-20-20:    XBEE baud rate didn't work well at 115200. Set back to 57600.
  ************************************************************************************************************/
 
 #ifndef MAIN_C
@@ -31,7 +32,7 @@
 #define ENTER 13
 #define CR ENTER
 #define BACKSPACE 8
-
+#define SPACEBAR ' '
 
 #define	STX '>'
 #define	DLE '/'
@@ -106,7 +107,7 @@ void UserInit(void);
 void YourHighPriorityISRCode();
 void YourLowPriorityISRCode();
 void USBCBSendResume(void);
-short BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData, unsigned char *ptrPacket);
+unsigned char BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData);
 extern unsigned short CalculateModbusCRC(unsigned char *input_str, short num_bytes);
 
 #define MIDIuart UART1
@@ -132,9 +133,11 @@ unsigned char HOSTRxBufferFull = false;
 unsigned short XBEERxIndex = 0;
 unsigned short XBEERxLength = 0;
 unsigned char XBEERxBuffer[MAXBUFFER];
-unsigned short XBEETxLength = 0;
-unsigned short XBEETxIndex = 0;
+unsigned char XBEEBufferFull = false;
+//unsigned short XBEETxLength = 0;
+//unsigned short XBEETxIndex = 0;
 unsigned char XBEETxBuffer[MAXBUFFER];
+unsigned short XBEETxHead = 0, XBEETxTail = 0;
 short outData[MAXBUFFER];
 
 unsigned short MIDITxLength = 0;
@@ -230,6 +233,7 @@ void SortPots()
 
 #define ENABLE_POTS 16
 unsigned char USBrunning = false;
+long ActualXBEEBaudrate = 0;
 int main(void) 
 {
     unsigned char UserButtonState = 1, ButtonRead, ch = 0;
@@ -239,6 +243,11 @@ int main(void)
     long averageValue = 0;
     long sumValue;    
     unsigned char command, subCommand;
+    unsigned char ResetFlag = false;
+    unsigned char RunFlag = false;
+    unsigned char testString[MAXBUFFER] = "\rThis is only a test";
+    short testLength = 0;
+    short testCounter = 1234;
     
     for (i = 0; i < MAXPOTS; i++)
     {        
@@ -258,22 +267,38 @@ int main(void)
     
     DelayMs(200);
 
-    printf("\r\rTESTING NO USB MODE #1\r\r");
-
+    printf("\r\rMIDI DEVICE START #1: XBEE Baudrate: %ld #1", ActualXBEEBaudrate);
+    printf("\rXBEE INTERRUPTS DISABLED", ActualXBEEBaudrate);
+    
     mLED_1_Off();
     mLED_2_Off();
     mLED_3_Off();
-    mLED_4_Off();
+    mLED_4_Off();    
     
-    while (1) 
+    while (1)         
     {
         if (controlCommand)
         {
             printf("\rCONTROL COMMAND %d: ", controlCommand);
-            if (controlCommand == ENABLE_POTS) 
+            if (controlCommand == SPACEBAR) 
+            {
+                if (!RunFlag)
+                {
+                    printf(" RESET");
+                    ResetFlag = true;
+                    RunFlag = true;
+                }
+                else 
+                {
+                    RunFlag = false;
+                    printf("\rTransmit disabled");
+                }
+            }
+            else if (controlCommand == ENABLE_POTS) 
             {
                 printf("ENABLE POTS: ");
                 setupCommand = ENABLE_POTS;
+                RunFlag = false;
             }
             else if (controlCommand == 17 || controlCommand == 24 || controlCommand == 3)
             {
@@ -293,62 +318,66 @@ int main(void)
                 ADresult[i] = (unsigned short) ReadADC10(i); // read the result of channel 0 conversion from the idle buffer
             AD1CON1bits.ASAM = 1;        // Restart sampling.s            
             SortPots();
-            //printf("\r#%d:", trialNum++);
-            //for (i = 0; i < MAXPOTS; i++) printf(" %d,", ADpots[i]);                        
-            
-            // printf("\r#%d: ", trialNum++);
             for (i = 0; i < MAXPOTS; i++)
-            {
-                arrPotValue[i][filterIndex] = ADpots[i];
-                //sumValue = 0;
-                //for (j = 0; j < FILTERSIZE; j++) 
-                //    sumValue = sumValue + (long)arrPotValue[i][j];
-                //averageValue = sumValue / FILTERSIZE;
-                //printf("%i, ", averageValue);
-            }
+                arrPotValue[i][filterIndex] = ADpots[i];  
             filterIndex++;
             if (filterIndex >= FILTERSIZE) filterIndex = 0;            
+            
+            if (RunFlag)
+            {
+                for (i = 0; i < MAXPOTS; i++)
+                {         
+                    if (arrPotEnable[i])
+                    {                        
+                        sumValue = 0;
+                        for (j = 0; j < FILTERSIZE; j++) 
+                            sumValue = sumValue + (long)arrPotValue[i][j];
+                        averageValue = sumValue / FILTERSIZE;                
+                        if ( (abs(averageValue - arrServoValue[i]) > 0) || ResetFlag)
                         
-            for (i = 0; i < MAXPOTS; i++)
-            {         
-                if (arrPotEnable[i])
-                {
-                    sumValue = 0;
-                    for (j = 0; j < FILTERSIZE; j++) 
-                        sumValue = sumValue + (long)arrPotValue[i][j];
-                    averageValue = sumValue / FILTERSIZE;                
-                    if (abs(averageValue - arrServoValue[i]) > 1)
-                    {                               
-                        arrServoDataReady[i] = true;
-                        if (averageValue >= 1023) averageValue = 1023;                    
-                        arrServoValue[i] = averageValue;
+                        // averageValue = ADpots[i];;
+                        // if ((averageValue != arrServoValue[i]) || ResetFlag)
+                        if  ( (abs(averageValue - arrServoValue[i]) > 2) || ResetFlag)
+                        {                               
+                            arrServoDataReady[i] = true;
+                            if (averageValue >= 1023) averageValue = 1023;                    
+                            arrServoValue[i] = averageValue;
                     
-                        servoHigh = (averageValue / 32) | 0b01000000;
-                        servoLow = (averageValue - (servoHigh * 32));
+                            servoHigh = (averageValue / 32) | 0b01000000;
+                            servoLow = (averageValue - (servoHigh * 32));
 
-                        if (TestEnable) printf("\r>>#%d: %i, ", i, averageValue);
+                            if (TestEnable || ResetFlag) printf("\r>>#%d: %i, ", i, averageValue);
                         
-                        if (!USBrunning)
-                        {
-                            outData[0] = averageValue; 
-                            command = 0xB0;
-                            subCommand = i;                                    
-                            XBEETxLength = BuildPacket(command, subCommand, 1, outData, XBEETxBuffer);
-                            while(!UARTTransmitterIsReady(XBEEuart));
-                            UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
-                            XBEETxIndex = 1;
-                            INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);                                                        
-                        }                        
-                        else if (!MIDIState[i])
-                        {                            
-                            k = i * 2;
-                            MIDITxBuffer[k+0] = (unsigned char) servoLow;
-                            MIDITxBuffer[k+1] = (unsigned char) servoHigh;                                        
-                            MIDIState[i] = SEND_LOW;                               
-                        }                        
-                    }
-                }
-            }            
+                            if (!USBrunning)
+                            {
+                                outData[0] = averageValue; 
+                                command = 0xB1;
+                                subCommand = i;         
+                                
+                                if (TEST_OUT) TEST_OUT = 0;
+                                else TEST_OUT = 1;
+
+                                if ( !BuildPacket(command, subCommand, 1, outData) )
+                                    printf("\r\rXBEE TX BUFFER OVERRUN ERROR!");
+                                else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
+                                {
+                                    while(!UARTTransmitterIsReady(XBEEuart));
+                                    UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
+                                    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+                                }
+                            }                        
+                            else if (!MIDIState[i])
+                            {                            
+                                k = i * 2;
+                                MIDITxBuffer[k+0] = (unsigned char) servoLow;
+                                MIDITxBuffer[k+1] = (unsigned char) servoHigh;                                        
+                                MIDIState[i] = SEND_LOW;                               
+                            }                        
+                        }
+                    }                
+                } // end if (ADint) 
+            } // end if RunFlag
+            if (ResetFlag) ResetFlag = false;
         }
         
         // MIDIStateMachine(); // Check MIOI UART for incoming data
@@ -615,6 +644,8 @@ void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
         if (UARTReceivedDataIsAvailable(HOSTuart)) {
             ch = toupper(UARTGetDataByte(HOSTuart));
             if (ch == '\n' || ch == 0);
+            else if (HOSTRxIndex == 0 && ch == ' ')
+                controlCommand = SPACEBAR;
             else if (ch == BACKSPACE) {
                 while (!UARTTransmitterIsReady(HOSTuart));
                 UARTSendDataByte(HOSTuart, ' ');
@@ -700,107 +731,14 @@ static void InitializeSystem(void)
 }//end InitializeSystem
 
 
-short BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData, unsigned char *ptrPacket)
-{
-	int i, j;
-    unsigned char arrOutputBytes[64];
-	short packetIndex = 0, numBytes = 0;
-    unsigned char dataByte;    
-    
-    union
-    {
-        unsigned char b[2];
-        unsigned short integer;
-    } convert;	
-
-	j = 0;
-	// Header first
-	arrOutputBytes[j++] = command;
-	arrOutputBytes[j++] = subcommand;
-	arrOutputBytes[j++] = numData;
-
-	// Convert integer data to unsigned chars    
-	for (i = 0; i < numData; i++)
-	{
-		convert.integer = ptrData[i];
-		arrOutputBytes[j++] = convert.b[0];
-		arrOutputBytes[j++] = convert.b[1];
-	}
-
-	convert.integer = CalculateModbusCRC(arrOutputBytes, j);      
-    
-	arrOutputBytes[j++] = convert.b[0];
-	arrOutputBytes[j++] = convert.b[1];
-	numBytes = j;
-
-	if (numBytes <= (MAXBUFFER + 16))
-	{
-        packetIndex = 0;
-		ptrPacket[packetIndex++] = STX;
-		for (i = 0; i < numBytes; i++)
-		{
-			dataByte = arrOutputBytes[i];
-			if (dataByte == STX || dataByte == DLE || dataByte == ETX)
-				ptrPacket[packetIndex++] = DLE;
-			if (packetIndex >= MAXBUFFER) return 0;
-			if (dataByte == ETX) dataByte = ETX - 1;
-			ptrPacket[packetIndex++] = dataByte;
-		}
-		ptrPacket[packetIndex++] = ETX;
-		return (packetIndex);
-	}
-	else return 0;
-}
 
 
-void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void) 
-{    
-    unsigned char ch;
-
-    if (XBEEbits.OERR || XBEEbits.FERR) 
-    {
-        if (UARTReceivedDataIsAvailable(XBEEuart))
-            ch = UARTGetDataByte(XBEEuart);
-        XBEEbits.OERR = 0;
-    } else if (INTGetFlag(INT_SOURCE_UART_RX(XBEEuart))) {
-        INTClearFlag(INT_SOURCE_UART_RX(XBEEuart));
-
-        if (UARTReceivedDataIsAvailable(XBEEuart)) {
-            ch = UARTGetDataByte(XBEEuart);
-            if (ch != 0xfe) 
-            {
-                // XBEEtimeout = XBEE_TIMEOUT;
-                if (XBEERxIndex >= MAXBUFFER) XBEERxIndex = 0;
-                XBEERxBuffer[XBEERxIndex++] = ch;
-            }
-        }
-    }
-
-    if (INTGetFlag(INT_SOURCE_UART_TX(XBEEuart))) {
-        INTClearFlag(INT_SOURCE_UART_TX(XBEEuart));
-        if (XBEETxLength) 
-        {
-            if (XBEETxIndex < MAXBUFFER) ch = XBEETxBuffer[XBEETxIndex++];
-            while (!UARTTransmitterIsReady(XBEEuart));
-            UARTSendDataByte(XBEEuart, ch);
-            if (XBEETxIndex >= XBEETxLength) 
-            {
-                INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
-                XBEETxLength = 0;
-                XBEETxIndex = 0;
-            }
-        } else INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
-    }
-}
 
 void __ISR(_TIMER_2_VECTOR, ipl5) Timer2Handler(void) 
 {
     static unsigned short hundredthSecondTimer = 0;
 
-    mT2ClearIntFlag(); // clear the interrupt flag
-    
-    if (TEST_OUT) TEST_OUT = 0;
-    else TEST_OUT = 1;
+    mT2ClearIntFlag(); // clear the interrupt flag    
 
     // milliSecondCounter++;
 
@@ -940,10 +878,11 @@ void UserInit(void)
 
     
     // Set up XBEE at 57600 baud
-    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
+    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY); 
+    // UARTConfigure(XBEEuart, UART_ENABLE_PINS_TX_RX_ONLY); 
     UARTSetFifoMode(XBEEuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
     UARTSetLineControl(XBEEuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
-    UARTSetDataRate(XBEEuart, SYS_FREQ, 57600);
+    ActualXBEEBaudrate = UARTSetDataRate(XBEEuart, SYS_FREQ, 57600);
     UARTEnable(XBEEuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
 
     // Configure XBEE Interrupts
@@ -1005,8 +944,9 @@ unsigned char ProcessUSB(void)
     static short LEDcounter = 0;
     static unsigned short lowServoByte = 0, highServoByte = 0;
     short servoValue = 0;
-    char command = 0, subcommand = 0, lastServo = false;
+    char command = 0, subCommand = 0;
     short k = 0;
+    short numberOfServos = 0;
     
     if ((USBDeviceState < CONFIGURED_STATE) || (USBSuspendControl == 1)) return false;
     
@@ -1026,17 +966,20 @@ unsigned char ProcessUSB(void)
                 
                 outData[0] = servoValue; 
                 command = ReceivedDataBuffer[1];
-                subcommand = ReceivedDataBuffer[2]-1;       
+                subCommand = ReceivedDataBuffer[2]-1;       
                 
-                printf("\rUSB RX Servo #%d: %d", subcommand, servoValue);                
+                printf("\rUSB RX Servo #%d: %d", subCommand, servoValue);                
                 
-                if (subcommand >= 0)
+                if (subCommand >= 0)
                 {
-                    XBEETxLength = BuildPacket(command, subcommand, 1, outData, XBEETxBuffer);
-                    while(!UARTTransmitterIsReady(XBEEuart));
-                    UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
-                    XBEETxIndex = 1;
-                    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+                    if ( !BuildPacket(command, subCommand, 1, outData) )
+                        printf("\r\rXBEE TX BUFFER OVERRUN ERROR!");
+                    else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
+                    {
+                        while(!UARTTransmitterIsReady(XBEEuart));
+                        UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
+                        INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+                    }                    
                 }
             }
         }
@@ -1056,16 +999,13 @@ unsigned char ProcessUSB(void)
         }
     }
     
-    lastServo = false;
-    while (!MIDIState[servoNumber])
+    numberOfServos = 0;
+    while (MIDIState[servoNumber]==IDLE)
     {
         servoNumber++;
-        if (servoNumber > MAXSERVOS) 
-        {            
-            servoNumber = 0;
-            if (lastServo) break;
-            else lastServo = true;
-        }
+        if (servoNumber > MAXSERVOS) servoNumber = 0;
+        numberOfServos++;
+        if (numberOfServos >= MAXSERVOS) break;
     }
     
     if (MIDIState[servoNumber] && !USBHandleBusy(USBTxHandle))
@@ -1093,6 +1033,124 @@ unsigned char ProcessUSB(void)
     }    
     return true;
 }//end ProcessUSB    
+
+unsigned char BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData)
+{
+	int i, j;
+    #define MAX_OUT_BYTES 64
+    unsigned char arrOutputBytes[MAX_OUT_BYTES+5];
+	short packetIndex = 0, packetLength = 0,numBytes = 0;
+    unsigned char dataByte;  
+    unsigned char TxPacket[MAXBUFFER];  
+    short TempHead;
+    
+    if (numData > MAX_OUT_BYTES) return false;
+    
+    union
+    {
+        unsigned char b[2];
+        unsigned short integer;
+    } convert;	
+
+	j = 0;
+	// Packet header first:
+	arrOutputBytes[j++] = command;
+	arrOutputBytes[j++] = subcommand;
+	arrOutputBytes[j++] = numData;
+
+	// Now add packet data:  
+	for (i = 0; i < numData; i++)
+	{
+		convert.integer = ptrData[i];
+		arrOutputBytes[j++] = convert.b[0];
+		arrOutputBytes[j++] = convert.b[1];
+	}
+    // Finally, packet CRC:
+	convert.integer = CalculateModbusCRC(arrOutputBytes, j);      
+    
+	arrOutputBytes[j++] = convert.b[0];
+	arrOutputBytes[j++] = convert.b[1];
+	numBytes = j;
+
+    // Now encode packet:
+    packetIndex = 0;
+	TxPacket[packetIndex++] = STX;
+	for (i = 0; i < numBytes; i++)
+	{
+		dataByte = arrOutputBytes[i];        
+		if (dataByte == STX || dataByte == DLE || dataByte == ETX)
+        {
+            if (packetIndex >= MAXBUFFER) return false;
+			TxPacket[packetIndex++] = DLE;
+        }
+		if (dataByte == ETX) dataByte = ETX - 1;
+        if (packetIndex >= MAXBUFFER) return false;        
+		TxPacket[packetIndex++] = dataByte;
+	}
+    if (packetIndex >= MAXBUFFER) return false;            
+	TxPacket[packetIndex++] = ETX;		
+	
+    packetLength = packetIndex;
+    
+    // Before inserting new packet into transmit buffer, make sure there is enough room for it:
+    TempHead = XBEETxHead;    
+    i = 0;
+    do {        
+        i++;
+        if (i >= packetLength) break;
+        TempHead++;
+        if (TempHead >= MAXBUFFER) TempHead = 0;
+    } while (TempHead!=XBEETxTail);
+    
+    if (i < packetLength) return false; // Not enough room! Return false to indicate overrun error.
+    
+    // Ready to go. Copy packet to transmit buffer:
+    for (i = 0; i < packetLength; i++)
+    {        
+        XBEETxBuffer[XBEETxHead++] = TxPacket[i];
+        if (XBEETxHead >= MAXBUFFER) XBEETxHead = 0;
+    }    
+    return true;
+}
+
+
+void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void) 
+{    
+    unsigned char ch;
+
+    if (XBEEbits.OERR || XBEEbits.FERR) 
+    {
+        if (UARTReceivedDataIsAvailable(XBEEuart))
+            ch = UARTGetDataByte(XBEEuart);
+        XBEEbits.OERR = 0;
+    } else if (INTGetFlag(INT_SOURCE_UART_RX(XBEEuart))) {
+        INTClearFlag(INT_SOURCE_UART_RX(XBEEuart));
+
+        if (UARTReceivedDataIsAvailable(XBEEuart)) {
+            ch = UARTGetDataByte(XBEEuart);
+            if (XBEERxIndex < MAXBUFFER) XBEERxBuffer[XBEERxIndex++] = ch;
+            if (ch == '\r') 
+            {
+                XBEEBufferFull = true;
+                XBEERxBuffer[XBEERxIndex++] = '\0';
+                XBEERxIndex = 0;
+            }
+        }
+    }
+
+    if (INTGetFlag(INT_SOURCE_UART_TX(XBEEuart))) {
+        INTClearFlag(INT_SOURCE_UART_TX(XBEEuart));
+        if (XBEETxTail!=XBEETxHead) 
+        {
+            ch = XBEETxBuffer[XBEETxTail++];
+            if (XBEETxTail >= MAXBUFFER) XBEETxTail = 0;                
+            while (!UARTTransmitterIsReady(XBEEuart));
+            UARTSendDataByte(XBEEuart, ch);
+        } else INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
+    }
+}
+
+
 
 /** EOF main.c *************************************************/
 #endif
