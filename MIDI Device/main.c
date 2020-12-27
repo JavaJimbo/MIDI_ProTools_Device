@@ -24,6 +24,7 @@
  * 12-16-20:    Debugged & added USBrunning flag.
  * 12-16-20:    Works now with multiple servos recording and playing back on ProTools.
  * 12-20-20:    XBEE baud rate didn't work well at 115200. Set back to 57600.
+ * 12-27-20:    Fixed XBEE TxBuffer bug - always transmit character at XBEETxBuffer[XBEETxTail]
  ************************************************************************************************************/
 
 #ifndef MAIN_C
@@ -88,9 +89,9 @@
 #define TX_BUFFER_ADDRESS_TAG
 #define MIDI_EVENT_ADDRESS_TAG
 
-// unsigned char ReceivedDataBuffer[64] RX_BUFFER_ADDRESS_TAG;
+// BYTE ReceivedDataBuffer[64] RX_BUFFER_ADDRESS_TAG;
 BYTE ReceivedDataBuffer[64];
-unsigned char ToSendDataBuffer[64] TX_BUFFER_ADDRESS_TAG;
+BYTE ToSendDataBuffer[64] TX_BUFFER_ADDRESS_TAG;
 USB_AUDIO_MIDI_EVENT_PACKET midiData MIDI_EVENT_ADDRESS_TAG;
 
 
@@ -102,13 +103,13 @@ USB_HANDLE USBRxHandle = 0;
 int ADC10_ManualInit(void);
 void BlinkUSBStatus(void);
 static void InitializeSystem(void);
-unsigned char ProcessUSB(void);
+BYTE ProcessUSB(void);
 void UserInit(void);
 void YourHighPriorityISRCode();
 void YourLowPriorityISRCode();
 void USBCBSendResume(void);
-unsigned char BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData);
-extern unsigned short CalculateModbusCRC(unsigned char *input_str, short num_bytes);
+BYTE BuildPacket(BYTE command, BYTE subcommand, BYTE numData, short *ptrData);
+extern unsigned short CalculateModbusCRC(BYTE *input_str, short num_bytes);
 
 #define MIDIuart UART1
 #define MIDIbits U1STAbits
@@ -122,45 +123,39 @@ extern unsigned short CalculateModbusCRC(unsigned char *input_str, short num_byt
 #define XBEEbits U4STAbits
 #define XBEE_VECTOR _UART_4_VECTOR
 
-//#define DMXuart UART5
-//#define DMXbits U5STAbits
-//#define DMX_VECTOR _UART_5_VECTOR
+#define RS485uart UART5
+#define RS485_RxReg U5RXREG
+#define RS485_TxReg U5TXREG
+#define RS485bits U5STAbits
+#define RS485_VECTOR _UART_5_VECTOR
+#define RS485_RX_IRQ _UART5_RX_IRQ
+#define RS485_TX_IRQ _UART5_TX_IRQ
+
 
 #define MAXBUFFER 256
-unsigned char HOSTRxBuffer[MAXBUFFER];
-unsigned char HOSTRxBufferFull = false;
+BYTE HOSTRxBuffer[MAXBUFFER];
+BYTE HOSTRxBufferFull = false;
 
 unsigned short XBEERxIndex = 0;
 unsigned short XBEERxLength = 0;
-unsigned char XBEERxBuffer[MAXBUFFER];
-unsigned char XBEEBufferFull = false;
-//unsigned short XBEETxLength = 0;
-//unsigned short XBEETxIndex = 0;
-unsigned char XBEETxBuffer[MAXBUFFER];
+BYTE XBEERxBuffer[MAXBUFFER];
+BYTE XBEEBufferFull = false;
+BYTE XBEETxBuffer[MAXBUFFER];
 unsigned short XBEETxHead = 0, XBEETxTail = 0;
 short outData[MAXBUFFER];
 
 unsigned short MIDITxLength = 0;
 unsigned short MIDITxIndex = 0;
-unsigned char MIDITxBuffer[MAXBUFFER];
-unsigned char MIDIRxBuffer[MAXBUFFER];
+BYTE MIDITxBuffer[MAXBUFFER];
+BYTE MIDIRxBuffer[MAXBUFFER];
 unsigned short MIDIRxIndex = 0;
 
-/*
-unsigned char DMXRxBuffer[MAXBUFFER + 1];
-unsigned char DMXTxBuffer[MAXBUFFER + 1];
-unsigned char DMXflag = false;
-static unsigned char DMXstate = DMX_STANDBY;
-*/
 
 #define MAXPOTS 10
 unsigned short ADresult[MAXPOTS];
 unsigned short ADpots[MAXPOTS];
 
 void ConfigAd(void);
-
-// unsigned short milliSecondCounter = 0;
-
 
 #define SET_DISPLAY 4 // CTL-D
 #define SET_SERVO 19 // CTL-S
@@ -173,15 +168,15 @@ void ConfigAd(void);
 #define NUMBER_ERROR 32767
 
 struct servoType {
-    unsigned char ID;
+    BYTE ID;
     unsigned short position;
-    unsigned char updated;
-    unsigned char enabled;
+    BYTE updated;
+    BYTE enabled;
 };
 
 unsigned short MIDIStateMachine(void);
 // short MIDItimeout = 0;
-unsigned char MIDIbufferFull = false;
+BYTE MIDIbufferFull = false;
 
 #define MIDI_TIMEOUT 2
 
@@ -192,16 +187,16 @@ unsigned char MIDIbufferFull = false;
 #define TEST_MODE 4
 
 
-const unsigned char MIDIpercussionCommand[7] = {0xB0, 0x00, 0x7F, 0x20, 0x00, 0xC0, 0x00};
+const BYTE MIDIpercussionCommand[7] = {0xB0, 0x00, 0x7F, 0x20, 0x00, 0xC0, 0x00};
 unsigned short MIDInoteTimeout = 0;
 
-unsigned char ADint = false;
+BYTE ADint = false;
 #define FILTERSIZE 16
 long arrPotValue[MAXPOTS][FILTERSIZE];
-unsigned char arrPotEnable[MAXPOTS];
+BYTE arrPotEnable[MAXPOTS];
 #define MAXSERVOS MAXPOTS
 long arrServoValue[MAXSERVOS];
-unsigned char arrServoDataReady[MAXSERVOS];
+BYTE arrServoDataReady[MAXSERVOS];
 long servoLow = 0, servoHigh = 0;
 
 enum {
@@ -210,8 +205,8 @@ enum {
     SEND_HI
 };
 
-unsigned char MIDIState[MAXSERVOS];
-unsigned char setupCommand = 0, controlCommand = 0x00;
+BYTE MIDIState[MAXSERVOS];
+BYTE setupCommand = 0, controlCommand = 0x00;
 
 
 // ADresult
@@ -232,20 +227,20 @@ void SortPots()
 }
 
 #define ENABLE_POTS 16
-unsigned char USBrunning = false;
+BYTE USBrunning = false;
 long ActualXBEEBaudrate = 0;
 int main(void) 
 {
-    unsigned char UserButtonState = 1, ButtonRead, ch = 0;
+    BYTE UserButtonState = 1, ButtonRead, ch = 0;
     short i, j, k, UserButtonDebouncer = 0;    
-    unsigned char TestEnable = false;
+    BYTE TestEnable = false;
     short filterIndex = 0;
     long averageValue = 0;
     long sumValue;    
-    unsigned char command, subCommand;
-    unsigned char ResetFlag = false;
-    unsigned char RunFlag = false;
-    unsigned char testString[MAXBUFFER] = "\rThis is only a test";
+    BYTE command, subCommand;
+    BYTE ResetFlag = false;
+    BYTE RunFlag = false;
+    BYTE testString[MAXBUFFER] = "\rThis is only a test";
     short testLength = 0;
     short testCounter = 1234;
     
@@ -267,7 +262,7 @@ int main(void)
     
     DelayMs(200);
 
-    printf("\r\rMIDI DEVICE START #1: XBEE Baudrate: %ld #1", ActualXBEEBaudrate);
+    printf("\r\rXBEE XMIT START #1: XBEE Baudrate: %ld #1", ActualXBEEBaudrate);
     printf("\rXBEE INTERRUPTS DISABLED", ActualXBEEBaudrate);
     
     mLED_1_Off();
@@ -351,7 +346,7 @@ int main(void)
                             if (!USBrunning)
                             {
                                 outData[0] = averageValue; 
-                                command = 0xB1;
+                                command = 0xBA;
                                 subCommand = i;         
                                 
                                 if (TEST_OUT) TEST_OUT = 0;
@@ -361,16 +356,18 @@ int main(void)
                                     printf("\r\rXBEE TX BUFFER OVERRUN ERROR!");
                                 else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
                                 {
-                                    while(!UARTTransmitterIsReady(XBEEuart));
-                                    UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
-                                    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
+                                    ch = XBEETxBuffer[XBEETxTail++];
+                                    if (XBEETxTail >= MAXBUFFER) XBEETxTail = 0;                
+                                    while (!UARTTransmitterIsReady(XBEEuart));
+                                    UARTSendDataByte(XBEEuart, ch);    
+                                    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);                                    
                                 }
                             }                        
                             else if (!MIDIState[i])
                             {                            
                                 k = i * 2;
-                                MIDITxBuffer[k+0] = (unsigned char) servoLow;
-                                MIDITxBuffer[k+1] = (unsigned char) servoHigh;                                        
+                                MIDITxBuffer[k+0] = (BYTE) servoLow;
+                                MIDITxBuffer[k+1] = (BYTE) servoHigh;                                        
                                 MIDIState[i] = SEND_LOW;                               
                             }                        
                         }
@@ -599,7 +596,7 @@ BOOL USER_USB_CALLBACK_EVENT_HANDLER(int event, void *pdata, WORD size) {
 
 
 unsigned short MIDIStateMachine(void) {
-    unsigned char ch;
+    BYTE ch;
     static unsigned short index = 0;
 
     while (index != MIDIRxIndex) {
@@ -631,7 +628,7 @@ void __ISR(_CHANGE_NOTICE_VECTOR, ipl2) ChangeNotice_Handler(void) {
 // HOST UART interrupt handler it is set at priority level 2
 
 void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
-    unsigned char ch;
+    BYTE ch;
     static unsigned short HOSTRxIndex = 0;
 
     if (HOSTbits.OERR || HOSTbits.FERR) {
@@ -674,7 +671,7 @@ void __ISR(HOST_VECTOR, ipl2) IntHostUartHandler(void) {
 /*
 void __ISR(MIDI_VECTOR, ipl2) IntMIDIHandler(void) 
 {    
-    unsigned char ch;
+    BYTE ch;
 
     if (MIDIbits.OERR || MIDIbits.FERR) {
         if (UARTReceivedDataIsAvailable(MIDIuart))
@@ -937,14 +934,14 @@ void UserInit(void)
 
 }//end UserInit
 
-unsigned char ProcessUSB(void)
+BYTE ProcessUSB(void)
 {
     static short servoNumber = 0;
-    static unsigned char LEDflag = false;
+    static BYTE LEDflag = false;
     static short LEDcounter = 0;
     static unsigned short lowServoByte = 0, highServoByte = 0;
     short servoValue = 0;
-    char command = 0, subCommand = 0;
+    BYTE ch, command = 0, subCommand = 0;
     short k = 0;
     short numberOfServos = 0;
     
@@ -965,10 +962,10 @@ unsigned char ProcessUSB(void)
                 servoValue = lowServoByte | highServoByte;
                 
                 outData[0] = servoValue; 
-                command = ReceivedDataBuffer[1];
+                command = ReceivedDataBuffer[1] & 0xFF;
                 subCommand = ReceivedDataBuffer[2]-1;       
                 
-                printf("\rUSB RX Servo #%d: %d", subCommand, servoValue);                
+                printf("\rUSB CH %02X Servo #%d: %d", command, subCommand, servoValue);                
                 
                 if (subCommand >= 0)
                 {
@@ -976,8 +973,10 @@ unsigned char ProcessUSB(void)
                         printf("\r\rXBEE TX BUFFER OVERRUN ERROR!");
                     else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
                     {
-                        while(!UARTTransmitterIsReady(XBEEuart));
-                        UARTSendDataByte (XBEEuart, XBEETxBuffer[0]);
+                        ch = XBEETxBuffer[XBEETxTail++];
+                        if (XBEETxTail >= MAXBUFFER) XBEETxTail = 0;                
+                        while (!UARTTransmitterIsReady(XBEEuart));
+                        UARTSendDataByte(XBEEuart, ch);
                         INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
                     }                    
                 }
@@ -1034,21 +1033,21 @@ unsigned char ProcessUSB(void)
     return true;
 }//end ProcessUSB    
 
-unsigned char BuildPacket(unsigned char command, unsigned char subcommand, unsigned char numData, short *ptrData)
+BYTE BuildPacket(BYTE command, BYTE subcommand, BYTE numData, short *ptrData)
 {
 	int i, j;
     #define MAX_OUT_BYTES 64
-    unsigned char arrOutputBytes[MAX_OUT_BYTES+5];
+    BYTE arrOutputBytes[MAX_OUT_BYTES+5];
 	short packetIndex = 0, packetLength = 0,numBytes = 0;
-    unsigned char dataByte;  
-    unsigned char TxPacket[MAXBUFFER];  
+    BYTE dataByte;  
+    BYTE TxPacket[MAXBUFFER];  
     short TempHead;
     
     if (numData > MAX_OUT_BYTES) return false;
     
     union
     {
-        unsigned char b[2];
+        BYTE b[2];
         unsigned short integer;
     } convert;	
 
@@ -1116,7 +1115,7 @@ unsigned char BuildPacket(unsigned char command, unsigned char subcommand, unsig
 
 void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void) 
 {    
-    unsigned char ch;
+    BYTE ch;
 
     if (XBEEbits.OERR || XBEEbits.FERR) 
     {
