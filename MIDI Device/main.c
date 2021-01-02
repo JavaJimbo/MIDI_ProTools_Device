@@ -32,6 +32,9 @@
  *              However for RS232 mode, the XBEETxBuffer[] had to be increased in size to over 16000 bytes.
  *              Not sure what the problem is. Maybe the Focusrite USB to MIDI converter
  *              accumulates the MIDI data into big bundles. USB mode might still be the better bet.
+ * 1-1-20:      Minor tweaks. Always display overrun errors, even when diagnostics aren't enabled.
+ * 1-2-20:      Added MIDI RS232 IO for keyboard. Seems to work better with recording than playing back.
+ *              Servo USB control still looks good.
  ************************************************************************************************************/
 
 #ifndef MAIN_C
@@ -153,18 +156,20 @@ extern unsigned short CalculateModbusCRC(BYTE *input_str, short num_bytes);
 BYTE HOSTRxBuffer[MAXBUFFER];
 BYTE HOSTRxBufferFull = false;
 
-#define MAXXBEEBUFFER 16384
-unsigned short XBEERxIndex = 0;
-unsigned short XBEERxLength = 0;
-BYTE XBEERxBuffer[16384];
-BYTE XBEEBufferFull = false;
+#define MAXXBEEBUFFER MAXBUFFER
+// unsigned short XBEERxIndex = 0;
+// unsigned short XBEERxLength = 0;
+// BYTE XBEERxBuffer[MAXXBEEBUFFER]; 
+// BYTE XBEEBufferFull = false;
 BYTE XBEETxBuffer[MAXXBEEBUFFER];
 unsigned short XBEETxHead = 0, XBEETxTail = 0;
 short outData[MAXBUFFER];
 
-BYTE MIDI_USB_Buffer[MAXBUFFER];
+BYTE MIDITxBuffer[MAXBUFFER];
+unsigned short MIDITxHead = 0, MIDITxTail = 0;
 BYTE MIDIRxBuffer[MAXBUFFER];
 unsigned short MIDIRxHead = 0, MIDIRxTail = 0;
+
 
 #define MAXPOTS 10
 unsigned short ADresult[MAXPOTS];
@@ -172,6 +177,7 @@ unsigned short ADpots[MAXPOTS];
 
 void ConfigAd(void);
 
+#define ENABLE_POTS 16
 #define SET_DISPLAY 4 // CTL-D
 #define SET_SERVO 19 // CTL-S
 #define SET_RECORD 18 // CTL-R
@@ -179,6 +185,8 @@ void ConfigAd(void);
 #define SET_SCALE 3 // CTL-C
 #define SET_PLAY 16 // CTL-P
 #define SET_PERCUSSION 5 // CTL-E
+#define SEND_NOTE_OFF_47 6 // CTL-F
+#define SEND_NOTE_OFF_48 7 // CTL-G
 #define SET_TEST 20 // CTL-T
 #define NUMBER_ERROR 32767
 
@@ -189,9 +197,6 @@ struct servoType {
     BYTE enabled;
 };
 
-unsigned short MIDIStateMachine(void);
-// short MIDItimeout = 0;
-BYTE MIDIbufferFull = false;
 
 /*
 #define MIDI_TIMEOUT 2
@@ -202,7 +207,8 @@ BYTE MIDIbufferFull = false;
 #define TEST_MODE 4
 */
 
-const BYTE MIDIpercussionCommand[7] = {0xB0, 0x00, 0x7F, 0x20, 0x00, 0xC0, 0x00};
+#define NUM_PERCUSSION_INIT_BYTES 7
+const BYTE MIDIpercussionCommand[NUM_PERCUSSION_INIT_BYTES] = {0xB0, 0x00, 0x7F, 0x20, 0x00, 0xC0, 0x00};
 unsigned short MIDInoteTimeout = 0;
 
 BYTE ADint = false;
@@ -235,20 +241,21 @@ void SortPots()
 typedef struct MIDIPacketHeader
 {
     BYTE MIDICommand;
-    BYTE MIDIServoNumber;
-    BYTE servoData;    
+    BYTE MIDIData1;
+    BYTE MIDIData2;    
 }MIDITxPacketType;
 
-MIDITxPacketType MIDITxBuffer[MAXBUFFER];
-short MIDITxHead = 0, MIDITxTail = 0, USBTxTail = 0;
-BYTE MIDITxState = 0;
+MIDITxPacketType USBTxBuffer[MAXBUFFER];
+short USBTxHead = 0, USBTxTail = 0;
 
-#define ENABLE_POTS 16
+
 BYTE XBEEonly = false;
 long ActualXBEEBaudrate = 0;
+long ActualMIDIBaudrate = 0;
 short errorCounter = 0;
 BYTE DiagnosticsEnable = false;
-
+BYTE MIDIRxOverrunError = false;
+ 
 int main(void) 
 {
     BYTE UserButtonState = 1, ButtonRead, ch = 0;
@@ -261,6 +268,7 @@ int main(void)
     BYTE RunFlag = false;
     short ButtonReadCounter = 0;    
     BYTE USBactive = false;
+    unsigned short MIDIRxOverrunCounter = 0;
     
     for (i = 0; i < MAXPOTS; i++)
     {        
@@ -278,8 +286,9 @@ int main(void)
     
     DelayMs(200);
 
-    printf("\r\rOVERRUN ERRORS MAXXBEEBUFFER = 16000, INTERRUPTS NOT INTERRUPTED #1");
-    printf("\rXBEE XMIT START #1: XBEE Baudrate: %ld #1", ActualXBEEBaudrate);    
+    printf("\r\rMIDI IO INIT PERCUSSION #1 NOTE OFF 47 AND 48");
+    printf("\rXBEE Baudrate: %ld", ActualXBEEBaudrate); 
+    printf("\rMIDI Baudrate: %ld", ActualMIDIBaudrate);
     
     mLED_1_Off();
     mLED_2_Off();
@@ -288,6 +297,12 @@ int main(void)
     
     while (1)         
     {        
+        if (MIDIRxOverrunError)
+        {
+            MIDIRxOverrunCounter++;
+            printf("\r#%d MIDI RX OVERRUN", MIDIRxOverrunCounter++);
+            MIDIRxOverrunError = false;
+        }
         if (controlCommand)
         {
             printf("\rCONTROL COMMAND %d: ", controlCommand);
@@ -341,11 +356,76 @@ int main(void)
             {
                 printf("CANCEL COMMAND");
                 setupCommand = 0;
+            }            
+            else if (controlCommand == SET_PERCUSSION)
+            {
+                printf("\rInitializing MIDI percussion: "); 
+                if (MIDITxHead < MAXBUFFER)
+                {
+                    for (i = 0; i < NUM_PERCUSSION_INIT_BYTES; i++)
+                    {
+                        ch = MIDIpercussionCommand[i];
+                        printf("%02X ", ch);
+                        MIDITxBuffer[MIDITxHead++] = ch;
+                        if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                    }
+                }
+                else printf("\rMAXBUFFER OVERRUN ERROR"); 
+                // If MIDI TX interrupts aren't currently in progress,
+                // send first character and enable interrupts here:
+                if (!INTGetEnable(INT_SOURCE_UART_TX(MIDIuart)))
+                {                                                 
+                    ch = MIDITxBuffer[MIDITxTail];
+                    MIDITxTail++;
+                    if (MIDITxTail >= MAXBUFFER) MIDITxTail = 0;
+                    while (!UARTTransmitterIsReady(MIDIuart));
+                    UARTSendDataByte(MIDIuart, ch);    
+                    INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_ENABLED);                    
+                }                 
             }
+            else if (controlCommand == SEND_NOTE_OFF_47)
+            {
+                printf("\rNOTE OPF 0x47");
+                MIDITxBuffer[MIDITxHead++] = 0x80;
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                MIDITxBuffer[MIDITxHead++] = 0x47;
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                MIDITxBuffer[MIDITxHead++] = 0x40;
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;                
+         
+                if (!INTGetEnable(INT_SOURCE_UART_TX(MIDIuart)))
+                {                                                 
+                    ch = MIDITxBuffer[MIDITxTail];
+                    MIDITxTail++;
+                    if (MIDITxTail >= MAXBUFFER) MIDITxTail = 0;
+                    while (!UARTTransmitterIsReady(MIDIuart));
+                    UARTSendDataByte(MIDIuart, ch);    
+                    INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_ENABLED);                    
+                }                 
+            }
+            else if (controlCommand == SEND_NOTE_OFF_48)
+            {
+                printf("\rNOTE OPF 0x48");
+                MIDITxBuffer[MIDITxHead++] = 0x80;
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                MIDITxBuffer[MIDITxHead++] = 0x48;
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                MIDITxBuffer[MIDITxHead++] = 0x40;
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;                
+         
+                if (!INTGetEnable(INT_SOURCE_UART_TX(MIDIuart)))
+                {                                                 
+                    ch = MIDITxBuffer[MIDITxTail];
+                    MIDITxTail++;
+                    if (MIDITxTail >= MAXBUFFER) MIDITxTail = 0;
+                    while (!UARTTransmitterIsReady(MIDIuart));
+                    UARTSendDataByte(MIDIuart, ch);    
+                    INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_ENABLED);                    
+                }                 
+            }
+            
             controlCommand = 0;
         }
-                
-        
         if (ADint) 
         {
             ADint = false;
@@ -403,31 +483,34 @@ int main(void)
                             } 
                             else 
                             {
-                                if (MIDITxHead>=MAXBUFFER) MIDITxHead = 0;
-                                MIDITxBuffer[MIDITxHead].MIDICommand = 0xB0;
-                                MIDITxBuffer[MIDITxHead].MIDIServoNumber = i+1;
-                                MIDITxBuffer[MIDITxHead].servoData = (BYTE) servoLow;
-                                MIDITxHead++;
-                                if (MIDITxHead>=MAXBUFFER) MIDITxHead = 0;
-                                MIDITxBuffer[MIDITxHead].MIDICommand = 0xB0;
-                                MIDITxBuffer[MIDITxHead].MIDIServoNumber = i+1;
-                                MIDITxBuffer[MIDITxHead].servoData = (BYTE) servoHigh;
-                                MIDITxHead++;
-                                if (MIDITxHead>=MAXBUFFER) MIDITxHead = 0;    
+                                if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
+                                USBTxBuffer[USBTxHead].MIDICommand = 0xB0;
+                                USBTxBuffer[USBTxHead].MIDIData1 = i+1;
+                                USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) servoLow;
+                                USBTxHead++;
+                                if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
+                                USBTxBuffer[USBTxHead].MIDICommand = 0xB0;
+                                USBTxBuffer[USBTxHead].MIDIData1 = i+1;
+                                USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) servoHigh;
+                                USBTxHead++;
+                                if (USBTxHead>=MAXBUFFER) USBTxHead = 0;    
                             
+                                /*
                                 if (!USBactive)
                                 {
                                     if (DiagnosticsEnable || ResetFlag) printf("\rMIDI RS232 OUT #%d: %i, ", i, averageValue);
                                     if (!INTGetEnable(INT_SOURCE_UART_TX(MIDIuart)))
                                     {                                                 
-                                        ch = MIDITxBuffer[MIDITxTail].MIDICommand;
+                                        ch = USBTxBuffer[MIDITxTail].MIDICommand;
                                         while (!UARTTransmitterIsReady(MIDIuart));
                                         UARTSendDataByte(MIDIuart, ch);    
                                         INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_ENABLED);
                                         MIDITxState = SEND_SERVO_ID; // Tx state 0 is done, so go to next.
                                     }                            
-                                }
+                                }                                
                                 else if (DiagnosticsEnable || ResetFlag) printf("\rUSB OUT #%d: %i, ", i, averageValue);
+                                */
+                                if (DiagnosticsEnable || ResetFlag) printf("\rUSB OUT #%d: %i, ", i, averageValue);
                             }
                         }
                     }                
@@ -514,8 +597,7 @@ int main(void)
             XBEEonly = false;
             USBactive = true;
         }
-        if (!USBactive) 
-            ProcessMIDI_RS232();        
+        ProcessMIDI_RS232();
     }//end while
 }//end main        
 
@@ -661,23 +743,6 @@ BOOL USER_USB_CALLBACK_EVENT_HANDLER(int event, void *pdata, WORD size) {
     }
     return true;
 }
-
-/*
-unsigned short MIDIStateMachine(void) {
-    BYTE ch;
-    static unsigned short index = 0;
-
-    while (index != MIDIRxIndex) {
-        if (index >= MAXBUFFER) index = 0;
-        ch = MIDIRxBuffer[index++];
-        if (ch & 0x80) 
-        {
-            printf("\r%X ", ch);
-        } else printf("%X ", ch);
-    }
-    return (index);
-}
-*/
 
 /*
 void __ISR(_CHANGE_NOTICE_VECTOR, ipl2) ChangeNotice_Handler(void) {
@@ -906,8 +971,7 @@ void UserInit(void)
 
     
     // Set up XBEE at 57600 baud
-    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY); 
-    // UARTConfigure(XBEEuart, UART_ENABLE_PINS_TX_RX_ONLY); 
+    UARTConfigure(XBEEuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);      
     UARTSetFifoMode(XBEEuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
     UARTSetLineControl(XBEEuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
     ActualXBEEBaudrate = UARTSetDataRate(XBEEuart, SYS_FREQ, 57600);
@@ -924,7 +988,7 @@ void UserInit(void)
     UARTConfigure(MIDIuart, UART_ENABLE_HIGH_SPEED | UART_ENABLE_PINS_TX_RX_ONLY);
     UARTSetFifoMode(MIDIuart, UART_INTERRUPT_ON_TX_DONE | UART_INTERRUPT_ON_RX_NOT_EMPTY);
     UARTSetLineControl(MIDIuart, UART_DATA_SIZE_8_BITS | UART_PARITY_NONE | UART_STOP_BITS_1);
-    UARTSetDataRate(MIDIuart, SYS_FREQ, 31250);
+    ActualMIDIBaudrate = UARTSetDataRate(MIDIuart, SYS_FREQ, 31250);
     UARTEnable(MIDIuart, UART_ENABLE_FLAGS(UART_PERIPHERAL | UART_RX | UART_TX));
 
     // Configure MIDI Interrupts
@@ -980,6 +1044,7 @@ void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void)
     } else if (INTGetFlag(INT_SOURCE_UART_RX(XBEEuart))) {
         INTClearFlag(INT_SOURCE_UART_RX(XBEEuart));
 
+        /*
         if (UARTReceivedDataIsAvailable(XBEEuart)) {
             ch = UARTGetDataByte(XBEEuart);
             if (XBEERxIndex < MAXBUFFER) XBEERxBuffer[XBEERxIndex++] = ch;
@@ -990,6 +1055,7 @@ void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void)
                 XBEERxIndex = 0;
             }
         }
+        */
     }
 
     if (INTGetFlag(INT_SOURCE_UART_TX(XBEEuart))) {
@@ -1006,50 +1072,20 @@ void __ISR(XBEE_VECTOR, ipl2) IntXBEEHandler(void)
 
 
 
-void __ISR(MIDI_VECTOR, ipl2) IntMIDIHandler(void) 
-{    
-    BYTE ch;
-
-    if (MIDIbits.OERR || MIDIbits.FERR) {
-        if (UARTReceivedDataIsAvailable(MIDIuart))
-            ch = UARTGetDataByte(MIDIuart);
-        MIDIbits.OERR = 0;
-    } else if (INTGetFlag(INT_SOURCE_UART_RX(MIDIuart))) {
-        INTClearFlag(INT_SOURCE_UART_RX(MIDIuart));
-        if (UARTReceivedDataIsAvailable(MIDIuart)) {
-            ch = UARTGetDataByte(MIDIuart);
-            XBEEonly = false;
-            if (ch != 0xfe) 
-            {
-                if (MIDIRxHead >= MAXBUFFER) MIDIRxHead = 0;
-                MIDIRxBuffer[MIDIRxHead++] = ch;
-            }
-        }
-    }
-
-    if (INTGetFlag(INT_SOURCE_UART_TX(MIDIuart))) {
-        INTClearFlag(INT_SOURCE_UART_TX(MIDIuart));
-        if (MIDITxTail!=MIDITxHead) 
-        {
-            if (MIDITxState==SEND_MIDI_COMMAND)            
-                ch = MIDITxBuffer[MIDITxTail].MIDICommand;                          
-            else if (MIDITxState==SEND_SERVO_ID)
-                ch = MIDITxBuffer[MIDITxTail].MIDIServoNumber;
-            else ch = MIDITxBuffer[MIDITxTail].servoData;
-            
-            while (!UARTTransmitterIsReady(MIDIuart));
-            UARTSendDataByte(MIDIuart, ch);
-            MIDITxState++;
-            if (MIDITxState > SEND_SERVO_DATA)
-            {                
-                MIDITxState = SEND_MIDI_COMMAND;
-                MIDITxTail++;
-                if (MIDITxTail >= MAXBUFFER) MIDITxTail = 0;
-            }
-        } else INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_DISABLED);
-    }
-}
-
+// This routine handles both USB receiving and sending.
+// Returns TRUE if USB is active,
+// otherwise returns FALSE to indicate USB isn't working.
+//
+// The Microchip MIDI device is designed to send and receive
+// only one MIDI packet at a time. All packets must be four bytes.
+// First byte we ignore, next three bytes are standard MIDI command + data.
+// All MIDI commands have MSB = 1. The next two bytes must have MSB = 0.
+// So data greater than 127 must be broken up into two consecutive packets.
+// 
+// BYTE 0: Not sure what first byte does, but we ignore it.
+// BYTE 1: Standard MIDI command. High nibble is command, low nibble is MIDI channel. We use MIDI control command 0xB for servos. 
+// BYTE 2: We use this as servo ID number.
+// BYTE 3: Servo data.
 BYTE ProcessUSB(void)
 {
     static BYTE LEDflag = false;
@@ -1058,11 +1094,14 @@ BYTE ProcessUSB(void)
     short servoValue = 0;
     BYTE ch, MIDIcommand = 0, command = 0, ServoNumber = 0, frame = 0;
     static unsigned short BeatNumber = 0x0000;
+    unsigned short TempHead = 0, TxIndex = 0;
+    static unsigned MIDIerrorCounter = 0;
    
-    if ((USBDeviceState < CONFIGURED_STATE) || (USBSuspendControl == 1)) return false;
+    if ((USBDeviceState < CONFIGURED_STATE) || (USBSuspendControl == 1)) return false;  // Return FALSE if USB is not in use.
     
     BlinkUSBStatus();
 
+    // INCOMING USB DATA FROM PC IS HANDLED HERE
     if (!USBHandleBusy(USBRxHandle)) 
     {
         USBRxHandle = USBRxOnePacket(MIDI_EP, ReceivedDataBuffer, 4);
@@ -1080,8 +1119,48 @@ BYTE ProcessUSB(void)
             if (TEST_OUT) TEST_OUT = 0;
             else TEST_OUT = 1;            
         }
+        // If incoming USB MIDI data isn't intended for robots, 
+        // assume it is for other MIDI devices such the keyboard.
+        // So copy the data and send it out the MIDI Uart: 
         else if ((MIDIcommand & 0xF0) != 0xB0)
+        {            
             printf("\r>???: %02X, %02X, %02X, %02X", ReceivedDataBuffer[0], ReceivedDataBuffer[1], ReceivedDataBuffer[2], ReceivedDataBuffer[3]);
+            // Before inserting new packet into MIDI transmit buffer, make sure there is enough room for it:
+            TempHead = MIDITxHead;    
+            TxIndex = 0;
+            do {        
+                TempHead++;
+                if (TempHead >= MAXBUFFER) TempHead = 0;
+                TxIndex++;
+            } while (TempHead!=MIDITxTail && TxIndex < 3);    
+            
+            // If there is an overrun error in MIDI TX buffer, display it here
+            if (TempHead==MIDITxTail) 
+                printf("\r#%d: MIDI TX OVERRUN in ProcessUSB()", MIDIerrorCounter++);
+            // Otherwise insert the three MIDI bytes in the TX buffer and send to MIDI Uart:
+            else 
+            {
+                MIDITxBuffer[MIDITxHead++] = ReceivedDataBuffer[1];
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                MIDITxBuffer[MIDITxHead++] = ReceivedDataBuffer[2];
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                MIDITxBuffer[MIDITxHead++] = ReceivedDataBuffer[3];
+                if (MIDITxHead >= MAXBUFFER) MIDITxHead = 0;
+                
+                // If MIDI TX interrupts aren't currently in progress,
+                // send first character and enable interrupts here:
+                if (!INTGetEnable(INT_SOURCE_UART_TX(MIDIuart)))
+                {                                                 
+                    ch = MIDITxBuffer[MIDITxTail];
+                    MIDITxTail++;
+                    if (MIDITxTail >= MAXBUFFER) MIDITxTail = 0;
+                    while (!UARTTransmitterIsReady(MIDIuart));
+                    UARTSendDataByte(MIDIuart, ch);    
+                    INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_ENABLED);                    
+                }                            
+            }
+            return true; // Return true to indicate USB is active
+        }        
         else 
         {
             if (0 == (ReceivedDataBuffer[3] & 0b01000000)) lowServoByte = (unsigned short)ReceivedDataBuffer[3];
@@ -1111,8 +1190,7 @@ BYTE ProcessUSB(void)
                 }
                 printf("USB RX: %02X Servo #%d: %d", command, ServoNumber, servoValue);                
             }
-        }
-            
+        }          
         LEDcounter++;
         if (LEDcounter > 10) {
             LEDcounter = 0;
@@ -1128,85 +1206,26 @@ BYTE ProcessUSB(void)
         }
     }
     
-    if (USBTxTail!=MIDITxHead && !USBHandleBusy(USBTxHandle))
+    // OUTGOING USB DATA TO BE SENT TO PC IS HANDLED HERE
+    if (USBTxTail!=USBTxHead && !USBHandleBusy(USBTxHandle))
     {           
         midiData.Val = 0;   //must set all unused values to 0 so go ahead
                     
         midiData.CableNumber = 0;
         midiData.CodeIndexNumber = MIDI_CIN_CONTROL_CHANGE;
-        midiData.DATA_0 = MIDITxBuffer[USBTxTail].MIDICommand;
-        midiData.DATA_1 = MIDITxBuffer[USBTxTail].MIDIServoNumber;
-        midiData.DATA_2 = MIDITxBuffer[USBTxTail].servoData;
+        midiData.DATA_0 = USBTxBuffer[USBTxTail].MIDICommand;
+        midiData.DATA_1 = USBTxBuffer[USBTxTail].MIDIData1;
+        midiData.DATA_2 = USBTxBuffer[USBTxTail].MIDIData2;
                 
         USBTxHandle = USBTxOnePacket(MIDI_EP,(BYTE*)&midiData,4);
         USBTxTail++;
         if (USBTxTail >= MAXBUFFER) USBTxTail = 0;
     }    
-    return true;
+    return true; // Return true to indicate USB is active
 }//end ProcessUSB    
 
-BYTE ProcessMIDI_RS232(void)
-{
-    static unsigned short lowServoByte = 0, highServoByte = 0;
-    short servoValue = 0;
-    static BYTE ch, command = 0, ServoNumber = 0;
-    static unsigned short MIDIRxState = 0;    
-    static unsigned short RxCounter = 0;
-    
-    while(MIDIRxTail!=MIDIRxHead)
-    {
-        ch = MIDIRxBuffer[MIDIRxTail];        
-        MIDIRxTail++;
-        if (MIDIRxTail>=MAXBUFFER) MIDIRxTail=0;
-        if (ch & 0x80)
-        {
-            if ((ch & 0xF0)==0xB0) MIDIRxState = SEND_MIDI_COMMAND;
-            else MIDIRxState = 0;
-        }        
-        
-        if (!MIDIRxState) 
-            return false;        
-        else if (MIDIRxState==SEND_MIDI_COMMAND) 
-        {
-            command = ch;
-            MIDIRxState++;
-        }
-        else if (MIDIRxState==SEND_SERVO_ID) 
-        {
-            ServoNumber = ch-1;
-            MIDIRxState++;
-        }
-        else // if (MIDIRxState==SEND_SERVO_DATA) 
-        {
-            MIDIRxState = 0;
-            if (0 == (ch & 0b01000000)) lowServoByte = (unsigned short)ch;
-            else {
-                highServoByte = (unsigned short) (ch & 0b10111111);
-                highServoByte = highServoByte << 5;
-                servoValue = lowServoByte | highServoByte;                
-                outData[0] = servoValue; 
-                if (DiagnosticsEnable) printf ("\rRx %d Servo %d: %d", RxCounter++, ServoNumber, servoValue);
-                
-                if (ServoNumber >= 0)
-                {
-                    if ( !BuildXBEEpacket(command, ServoNumber, 1, outData) )
-                    {
-                       if (DiagnosticsEnable) printf("\rMIDI RX #%d: XBEE OVERRUN ERROR!", errorCounter++);
-                    }
-                    else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
-                    {
-                        ch = XBEETxBuffer[XBEETxTail++];
-                        if (XBEETxTail >= MAXXBEEBUFFER) XBEETxTail = 0;                
-                        while (!UARTTransmitterIsReady(XBEEuart));
-                        UARTSendDataByte(XBEEuart, ch);
-                        INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
-                    }                    
-                }
-            }
-        }            
-    }    
-    return true;
-}//end ProcessUSB    
+
+
 
 BYTE BuildXBEEpacket(BYTE command, BYTE ServoNumber, BYTE numData, short *ptrData)
 {
@@ -1306,12 +1325,12 @@ BYTE BuildXBEEpacket(BYTE command, BYTE ServoNumber, BYTE numData, short *ptrDat
     
     if (TempHead==XBEETxTail) 
     {
-        printf("\r#4 HEAD == TAIL, LENGTH: %d, TAIL: %d, COUNT; %d, TOTAL: %d", packetLength, XBEETxTail, packetCount, totalPacketLength);
+        printf("\rBuildXBEEpacket ERROR LENGTH: %d, TAIL: %d, COUNT; %d, TOTAL: %d", packetLength, XBEETxTail, packetCount, totalPacketLength);
         packetCount = 0;
         totalPacketLength = 0;
         XBEETxHead = XBEETxTail;
         INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_DISABLED);
-        return false; // Not enough room! Return false to indicate overrun error.
+        return false; 
     }
     else packetCount++;
     
@@ -1325,6 +1344,99 @@ BYTE BuildXBEEpacket(BYTE command, BYTE ServoNumber, BYTE numData, short *ptrDat
     //if (InterruptFlag) INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);
     return true;
 }
+
+
+void __ISR(MIDI_VECTOR, ipl2) IntMIDIHandler(void) 
+{    
+    BYTE ch;
+
+    if (MIDIbits.OERR || MIDIbits.FERR) {
+        if (UARTReceivedDataIsAvailable(MIDIuart))
+            ch = UARTGetDataByte(MIDIuart);
+        MIDIbits.OERR = 0;
+    } else if (INTGetFlag(INT_SOURCE_UART_RX(MIDIuart))) {
+        INTClearFlag(INT_SOURCE_UART_RX(MIDIuart));
+        
+        if (UARTReceivedDataIsAvailable(MIDIuart)) {
+            ch = UARTGetDataByte(MIDIuart);                    
+            if (ch != 0xfe) 
+            {
+                if (MIDIRxHead < MAXBUFFER) MIDIRxBuffer[MIDIRxHead] = ch;
+                MIDIRxHead++;
+                if (MIDIRxHead >= MAXBUFFER) MIDIRxHead = 0;
+                if (MIDIRxHead == MIDIRxTail) MIDIRxOverrunError = true;
+            }
+        }
+    }
+
+    if (INTGetFlag(INT_SOURCE_UART_TX(MIDIuart))) {
+        INTClearFlag(INT_SOURCE_UART_TX(MIDIuart));
+        if (MIDITxTail!=MIDITxHead) 
+        {           
+            if (MIDITxTail >= MAXBUFFER)
+            {
+                MIDITxTail=MIDITxHead;
+                INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_DISABLED);
+            }
+            else
+            {
+                ch = MIDITxBuffer[MIDITxTail];
+                while (!UARTTransmitterIsReady(MIDIuart));
+                UARTSendDataByte(MIDIuart, ch);
+                DelayMs(1); // $$$$
+                MIDITxTail++;
+                if (MIDITxTail >= MAXBUFFER) MIDITxTail = 0;
+            }
+        } else INTEnable(INT_SOURCE_UART_TX(MIDIuart), INT_DISABLED);
+    }
+}
+
+BYTE ProcessMIDI_RS232(void)
+{
+    static BYTE ch = 0, MIDIcommand = 0, MIDIdata1 = 0, MIDIdata2 = 0;
+    static unsigned short MIDIRxState = 0;        
+    
+    while (MIDIRxTail!=MIDIRxHead)
+    {
+        ch = MIDIRxBuffer[MIDIRxTail];        
+        MIDIRxTail++;
+        if (MIDIRxTail>=MAXBUFFER) MIDIRxTail=0;
+        if (ch & 0x80) // MIDIRxState == 0
+        {                                      
+            MIDIcommand = ch;
+            MIDIRxState = 1;
+        }
+        else if (MIDIRxState==1) 
+        {
+            MIDIdata1 = ch;
+            MIDIRxState = 2;
+        }
+        else if (MIDIRxState==2)
+        {
+            MIDIdata2 = ch;
+            MIDIRxState = 1;
+            if (MIDIdata1 != 0x47 && MIDIdata1 != 0x48)
+            {
+                if (USBTxHead < MAXBUFFER)
+                {
+                    USBTxBuffer[USBTxHead].MIDICommand = MIDIcommand;
+                    USBTxBuffer[USBTxHead].MIDIData1 = MIDIdata1;
+                    USBTxBuffer[USBTxHead].MIDIData2 = MIDIdata2;
+                    USBTxHead++;
+                    if (USBTxHead >= MAXBUFFER) USBTxHead = 0;
+                }
+                else // This error should never occur
+                {
+                    USBTxHead = USBTxTail = 0;
+                    MIDIRxState = 0;
+                    printf("\rMIDI USB TX HEAD OVERRUN ERROR");
+                    return false;
+                }
+            }
+        }            
+    }    
+    return true;
+}//end ProcessUSB    
 
 /** EOF main.c *************************************************/
 #endif
