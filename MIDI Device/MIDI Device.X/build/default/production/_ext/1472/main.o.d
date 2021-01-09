@@ -12,4 +12,5 @@ build/default/production/_ext/1472/main.o:  \
  ../HardwareProfile.h  \
 ../HardwareProfile\ -\ PIC32MX795F512L\ PIM.h  \
  ../usb_function_midi.h  \
-../Delay.h 
+../Delay.h  \
+../I2C_4BUS_EEPROM_PIC32.h 

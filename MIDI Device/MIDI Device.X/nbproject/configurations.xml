@@ -16,6 +16,7 @@
       <itemPath>../usb_device.h</itemPath>
       <itemPath>../usb_hal_pic32.h</itemPath>
       <itemPath>../Delay.h</itemPath>
+      <itemPath>../I2C_4BUS_EEPROM_PIC32.h</itemPath>
     </logicalFolder>
     <logicalFolder name="LinkerScript"
                    displayName="Linker Files"
@@ -29,6 +30,7 @@
       <itemPath>../DelayPIC32.c</itemPath>
       <itemPath>../main.c</itemPath>
       <itemPath>../CRCmodbus.c</itemPath>
+      <itemPath>../I2C_4BUS_EEPROM_PIC32.c</itemPath>
     </logicalFolder>
     <logicalFolder name="ExternalFiles"
                    displayName="Important Files"

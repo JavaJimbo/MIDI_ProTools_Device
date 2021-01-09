@@ -37,13 +37,17 @@
  *              Servo USB control still looks good.
  * 1-3-21:      Swapped in MIDITxPacketType for MIDIDTxBuffer.
  * 1-7-21:      Added DMX512 Rx and Tx.
- * 1-8-21       Tested DMX512 and servo control with XBEE - everything seems to work.
+ * 1-8-21:      Tested DMX512 and servo control with XBEE - everything seems to work.
+ * 1-9-21:      Added routine for writing configuration to EEprom.
+ *              MIDI channels for DMX and SERVO are stored in EEprom and may be modified.
  ************************************************************************************************************/
 
 #ifndef MAIN_C
 #define MAIN_C
-#define DMX_CHANNEL 0xB4
-#define SERVO_CHANNEL 0xB1
+//#define DMX_CHANNEL 0xB4
+//#define SERVO_CHANNEL 0xB1
+// #define KEYBOARD_CHANNEL 0xB0
+#define I2C_BUS I2C1
 
 enum {
     MIDI_STANDBY = 0,
@@ -52,8 +56,15 @@ enum {
     SEND_SERVO_DATA
 };
 
-#define DIAGNOSTICS 4
-#define XBEE_ONLY 24
+#define CANCEL_COMMAND 3 // C
+#define DIAGNOSTICS 4  // D
+#define DMX_ENABLE 24   // X
+#define XBEE_ONLY 26  // Z
+#define SAVE_CONFIG 19 // S
+#define SET_DMX_CHANNEL 22 // V
+#define SET_SERVO_CHANNEL 2 // B
+
+
 #define TEST_OUT LATEbits.LATE4
 #define ENTER 13
 #define CR ENTER
@@ -83,7 +94,7 @@ enum {
 
 #include "GenericTypeDefs.h"
 #include "Compiler.h"
-
+#include "I2C_4BUS_EEPROM_PIC32.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -179,9 +190,8 @@ extern unsigned short CalculateModbusCRC(BYTE *input_str, short num_bytes);
 BYTE DMXRxBuffer[DMXLENGTH];
 BYTE DMXTxBuffer[DMXLENGTH];
 BYTE PreviousDMXRxBuffer[DMXLENGTH];
-BYTE DMXflag = false;
 
-
+BYTE DMXdataReceived = false;
 BYTE HOSTRxBuffer[MAXBUFFER];
 BYTE HOSTRxBufferFull = false;
 
@@ -261,16 +271,50 @@ short USBTxHead = 0, USBTxTail = 0;
 MIDITxPacketType MIDITxBuffer[MAXBUFFER];
 unsigned short MIDITxHead = 0, MIDITxTail = 0;
 
-BYTE XBEEonly = false;
+
 long ActualXBEEBaudrate = 0;
 long ActualMIDIBaudrate = 0;
 long ActualDMXBaudrate = 0;
 short errorCounter = 0;
-BYTE DiagnosticsEnable = false;
+
 BYTE MIDIRxOverrunError = false;
 
 unsigned short MIDITxDelay = 0;
 static unsigned char DMXstate=DMX_STANDBY;
+
+#define TEST_BYTE_1 0xAB
+#define TEST_BYTE_2 0xCD
+#define TEST_BYTE_3 0xEF
+#define TEST_ADDRESS_1 0
+#define TEST_ADDRESS_2 1
+#define TEST_ADDRESS_3 2
+
+#define XBEE_ADDRESS 3
+#define DMX_ADDRESS 4
+#define DIAGNOSTICS_ADDRESS 5
+#define DMX_CHANNEL_ADDRESS 6
+#define SERVO_CHANNEL_ADDRESS 7
+
+BYTE DMXchannel = 0xB4;
+BYTE SERVOchannel = 0xB1;
+
+BYTE XBEEonly = false;
+BYTE DMXenable = false;
+BYTE DiagnosticsEnable = false;
+
+BYTE CheckConfig();
+BYTE WriteConfig();
+BYTE ReadConfig();
+
+//BYTE OutString[] = "Let's see if this works...";
+//BYTE InString[64];
+
+void DisplayBaudrates()
+{
+    printf("\rDMX Baud rate: %ld", ActualDMXBaudrate);
+    printf("\rXBEE Baud rate: %ld", ActualXBEEBaudrate); 
+    printf("\rMIDI Baud rate: %ld", ActualMIDIBaudrate);
+}
 
 int main(void) 
 {
@@ -282,16 +326,19 @@ int main(void)
     long sumValue;    
     BYTE command, ServoNumber;
     BYTE ResetFlag = false;
-    BYTE RunFlag = false;
-    // short ButtonReadCounter = 0;    
+    BYTE RunFlag = false;        
     BYTE USBactive = false;
     unsigned short MIDIRxOverrunCounter = 0;
     unsigned short DMXTestCounter = 0;
     unsigned short lowDMXLamp = 0, highDMXLamp = 0;
-
+    BYTE enableAD = false;
+    BYTE Temp = 0;
+            
+    for (i = 0; i < DMXLENGTH; i++)
+        PreviousDMXRxBuffer[i] = -1;
     
     for (i = 0; i < DMXLENGTH; i++)
-        DMXTxBuffer[i] = PreviousDMXRxBuffer[i] = DMXRxBuffer[i] = 0x0;
+        DMXTxBuffer[i] = DMXRxBuffer[i] = 0;
     
     for (i = 0; i < MAXPOTS; i++)
     {        
@@ -305,15 +352,30 @@ int main(void)
         arrPotEnable[i] = false;        
     }
         
-    InitializeSystem();
+    InitializeSystem();    
+    initI2C(I2C_BUS);
     
     DelayMs(200);
+    
+    printf("\r\rMIDI CHANNEL TEST #0");
+    CheckConfig();
+    printf("\r\rDMX Channel: %02X", DMXchannel);
+    printf("\rSERVO Channel: %02X", SERVOchannel);      
+    
+    if (XBEEonly) printf("\rXBEE ONLY enabled");
+    else printf("\rXBEE ONLY disabled");
 
-    printf("\r\rSTARTING DMX CH %02X, SERVO CH %02X", DMX_CHANNEL, SERVO_CHANNEL);
-    printf("\rDMX Baud rate: %ld", ActualDMXBaudrate);
-    printf("\rXBEE Baud rate: %ld", ActualXBEEBaudrate); 
-    printf("\rMIDI Baud rate: %ld", ActualMIDIBaudrate);
-    printf("\rDiagnostics");
+    if (DMXenable) printf("\rDMX enabled");
+    else printf("\rDMX disabled");
+
+    if (DiagnosticsEnable) printf("\rDiagnostics enabled");
+    else printf("\rDiagnostics disabled");
+
+    printf("\r\rCONTROL COMMANDS:");    
+    printf("\rCANCEL: C");
+    printf("\rDIAGNOSTICS: D");
+    printf("\rDMX: X");
+    printf("\rXBEE: Z");       
     
     mLED_1_Off();
     mLED_2_Off();
@@ -321,11 +383,10 @@ int main(void)
     mLED_4_Off();    
  
     while (1)         
-    {        
-        
-        if (DMXflag)
+    {         
+        if (DMXdataReceived)
         {
-            DMXflag = false;
+            DMXdataReceived = false;
             if (DiagnosticsEnable)
             {
                 printf("\r#%d DMX: ", DMXTestCounter++);
@@ -343,12 +404,12 @@ int main(void)
                     lowDMXLamp = (lampValue - (highDMXLamp * 32));  
                     
                     if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
-                    USBTxBuffer[USBTxHead].MIDICommand = DMX_CHANNEL;
+                    USBTxBuffer[USBTxHead].MIDICommand = DMXchannel;
                     USBTxBuffer[USBTxHead].MIDIData1 = i+1; // Add one to servo or lamp number
                     USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) lowDMXLamp;
                     USBTxHead++;
                     if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
-                    USBTxBuffer[USBTxHead].MIDICommand = DMX_CHANNEL;
+                    USBTxBuffer[USBTxHead].MIDICommand = DMXchannel;
                     USBTxBuffer[USBTxHead].MIDIData1 = i+1;
                     USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) highDMXLamp;
                     USBTxHead++;
@@ -367,7 +428,60 @@ int main(void)
         if (controlCommand)
         {
             printf("\rCONTROL COMMAND %d: ", controlCommand);
-            if (controlCommand == XBEE_ONLY)
+            if (controlCommand == DMX_ENABLE)
+            {
+                if (DMXenable)
+                {
+                    DMXenable = false;
+                    printf("\rDMX disabled");                    
+                }
+                else
+                {
+                    DMXenable = true;
+                    printf("\rDMX enabled");
+                }
+                DelayMs(100);
+            }
+            else if (controlCommand == SAVE_CONFIG)
+            {
+                if (WriteConfig()) printf("\rConfig bytes written to EEprom");
+                else printf("\rERROR writing config to EEprom");
+            }
+            
+//#define SET_DMX_CHANNEL 22 // V
+//#define SET_SERVO_CHANNEL 2 // B            
+            
+            else if (controlCommand == SET_DMX_CHANNEL)
+            {
+                Temp = HOSTRxBuffer[0];
+                if (Temp >= 'A' && Temp <= 'F') 
+                {
+                    DMXchannel = (Temp - 'A' + 10) | 0xB0; 
+                    printf("\rDMX Channel: %02X", DMXchannel);
+                }
+                else if (Temp >= '0' && Temp <= '9') 
+                {
+                    DMXchannel = (Temp - '0') | 0xB0; 
+                    printf("\rDMX Channel: %02X", DMXchannel);
+                }
+                else printf("\rERROR: Bad character: %c", Temp);               
+            }            
+            else if (controlCommand == SET_SERVO_CHANNEL)
+            {
+                Temp = HOSTRxBuffer[0];
+                if (Temp >= 'A' && Temp <= 'F') 
+                {
+                    SERVOchannel = (Temp - 'A' + 10) | 0xB0; 
+                    printf("\rSERVO Channel: %02X", SERVOchannel);
+                }
+                else if (Temp >= '0' && Temp <= '9') 
+                {
+                    SERVOchannel = (Temp - '0') | 0xB0; 
+                    printf("\rSERVO Channel: %02X", SERVOchannel);
+                }
+                else printf("\rERROR: Bad character: %c", Temp);               
+            }            
+            else if (controlCommand == XBEE_ONLY)
             {
                 if (XBEEonly)
                 {
@@ -380,7 +494,7 @@ int main(void)
                     printf("\rXBEE only ON");
                 }
             }
-            if (controlCommand == DIAGNOSTICS)
+            else if (controlCommand == DIAGNOSTICS)
             {
                 if (DiagnosticsEnable)
                 {
@@ -413,7 +527,7 @@ int main(void)
                 setupCommand = ENABLE_POTS;
                 RunFlag = false;
             }
-            else if (controlCommand == 17 || controlCommand == 3)
+            else if (controlCommand == CANCEL_COMMAND)
             {
                 printf("CANCEL COMMAND");
                 setupCommand = 0;
@@ -458,76 +572,82 @@ int main(void)
         if (ADint) 
         {
             ADint = false;
-            IFS1bits.AD1IF = 0;
-            while(!IFS1bits.AD1IF);        
-            AD1CON1bits.ASAM = 0;        // Pause sampling. 
-            for (i = 0; i < MAXPOTS; i++)
-                ADresult[i] = (unsigned short) ReadADC10(i); // read the result of channel 0 conversion from the idle buffer
-            AD1CON1bits.ASAM = 1;        // Restart sampling.s            
-            SortPots();
-            for (i = 0; i < MAXPOTS; i++)
-                arrPotValue[i][filterIndex] = ADpots[i];  
-            filterIndex++;
-            if (filterIndex >= FILTERSIZE) filterIndex = 0;            
+            if (enableAD)
+            {
+                IFS1bits.AD1IF = 0;
+                while(!IFS1bits.AD1IF);        
+                AD1CON1bits.ASAM = 0;        // Pause sampling. 
+                for (i = 0; i < MAXPOTS; i++)
+                    ADresult[i] = (unsigned short) ReadADC10(i); // read the result of channel 0 conversion from the idle buffer
+                AD1CON1bits.ASAM = 1;        // Restart sampling.s            
+                SortPots();
+                for (i = 0; i < MAXPOTS; i++)
+                    arrPotValue[i][filterIndex] = ADpots[i];  
+                filterIndex++;
+                if (filterIndex >= FILTERSIZE) filterIndex = 0;
+            }
             
             if (RunFlag)
             {
-                for (i = 0; i < MAXPOTS; i++)
-                {         
-                    if (arrPotEnable[i])
-                    {                        
-                        sumValue = 0;
-                        for (j = 0; j < FILTERSIZE; j++) 
-                            sumValue = sumValue + (long)arrPotValue[i][j];
-                        averageValue = sumValue / FILTERSIZE;                
-                        if ( (abs(averageValue - arrServoValue[i]) > 0) || ResetFlag)
+                if (enableAD)
+                {
+                    for (i = 0; i < MAXPOTS; i++)
+                    {         
+                        if (arrPotEnable[i])
+                        {                        
+                            sumValue = 0;
+                            for (j = 0; j < FILTERSIZE; j++) 
+                                sumValue = sumValue + (long)arrPotValue[i][j];
+                            averageValue = sumValue / FILTERSIZE;                
+                            if ( (abs(averageValue - arrServoValue[i]) > 0) || ResetFlag)
                         
-                        // averageValue = ADpots[i];;
-                        // if ((averageValue != arrServoValue[i]) || ResetFlag)
-                        if  ( (abs(averageValue - arrServoValue[i]) > 2) || ResetFlag)
-                        {                                    
-                            if (averageValue >= 1023) averageValue = 1023;                    
-                            arrServoValue[i] = averageValue;
+                            // averageValue = ADpots[i];;
+                            // if ((averageValue != arrServoValue[i]) || ResetFlag)
+                            if  ( (abs(averageValue - arrServoValue[i]) > 2) || ResetFlag)
+                            {                                    
+                                if (averageValue >= 1023) averageValue = 1023;                    
+                                arrServoValue[i] = averageValue;
                     
-                            servoHigh = (averageValue / 32) | 0b01000000;
-                            servoLow = (averageValue - (servoHigh * 32));                            
+                                servoHigh = (averageValue / 32) | 0b01000000;
+                                servoLow = (averageValue - (servoHigh * 32));                            
                         
-                            if (XBEEonly)
-                            {
-                                outData[0] = averageValue; 
-                                command = 0xBA;
-                                ServoNumber = i;                                                    
-
-                                if ( !BuildXBEEpacket(command, ServoNumber, 1, outData) )
-                                    printf("\rXBEE ONLY OVERRUN ERROR #%d", errorCounter++);
-                                else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
+                                if (XBEEonly)
                                 {
-                                    ch = XBEETxBuffer[XBEETxTail++];
-                                    if (XBEETxTail >= MAXXBEEBUFFER) XBEETxTail = 0;                
-                                    while (!UARTTransmitterIsReady(XBEEuart));
-                                    UARTSendDataByte(XBEEuart, ch);    
-                                    INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);                                    
-                                }                                
-                                if (DiagnosticsEnable || ResetFlag) printf("\rXBEE ONLY #%d: %i, ", i, averageValue);
-                            } 
-                            else 
-                            {
-                                if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
-                                USBTxBuffer[USBTxHead].MIDICommand = SERVO_CHANNEL;
-                                USBTxBuffer[USBTxHead].MIDIData1 = i+1;  // Add one to servo or lamp number
-                                USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) servoLow;
-                                USBTxHead++;
-                                if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
-                                USBTxBuffer[USBTxHead].MIDICommand = SERVO_CHANNEL;
-                                USBTxBuffer[USBTxHead].MIDIData1 = i+1;
-                                USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) servoHigh;
-                                USBTxHead++;
-                                if (USBTxHead>=MAXBUFFER) USBTxHead = 0;                                
-                                if (DiagnosticsEnable || ResetFlag) printf("\rUSBTxHead SERVO #%d: %i, ", i, averageValue);
-                            }
-                        }
-                    }                
-                } // end if (ADint) 
+                                    outData[0] = averageValue; 
+                                    command = 0xBA;
+                                    ServoNumber = i;                                                    
+
+                                    if ( !BuildXBEEpacket(command, ServoNumber, 1, outData) )
+                                        printf("\rXBEE ONLY OVERRUN ERROR #%d", errorCounter++);
+                                    else if (!INTGetEnable(INT_SOURCE_UART_TX(XBEEuart)))
+                                    {
+                                        ch = XBEETxBuffer[XBEETxTail++];
+                                        if (XBEETxTail >= MAXXBEEBUFFER) XBEETxTail = 0;                
+                                        while (!UARTTransmitterIsReady(XBEEuart));
+                                        UARTSendDataByte(XBEEuart, ch);    
+                                        INTEnable(INT_SOURCE_UART_TX(XBEEuart), INT_ENABLED);                                    
+                                    }                                
+                                    if (DiagnosticsEnable || ResetFlag) printf("\rXBEE ONLY #%d: %i, ", i, averageValue);
+                                } 
+                                else 
+                                {
+                                    if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
+                                    USBTxBuffer[USBTxHead].MIDICommand = SERVOchannel;
+                                    USBTxBuffer[USBTxHead].MIDIData1 = i+1;  // Add one to servo or lamp number
+                                    USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) servoLow;
+                                    USBTxHead++;
+                                    if (USBTxHead>=MAXBUFFER) USBTxHead = 0;
+                                    USBTxBuffer[USBTxHead].MIDICommand = SERVOchannel;
+                                    USBTxBuffer[USBTxHead].MIDIData1 = i+1;
+                                    USBTxBuffer[USBTxHead].MIDIData2 = (BYTE) servoHigh;
+                                    USBTxHead++;
+                                    if (USBTxHead>=MAXBUFFER) USBTxHead = 0;                                
+                                    if (DiagnosticsEnable || ResetFlag) printf("\rUSBTxHead SERVO #%d: %i, ", i, averageValue);
+                                }
+                            } // if  ( (abs(averageValue
+                        } // if (arrPotEnable[i])
+                    } // for (i = 0;
+                } // end enableAD   
             } // end if RunFlag
             if (ResetFlag) ResetFlag = false;
         } // end if (ADint) 
@@ -578,6 +698,7 @@ int main(void)
             {
                 for (i = 0; i < MAXPOTS; i++) 
                     arrPotEnable[i] = false;
+                enableAD = false;
                 i = 0;
                 do {
                     ch = HOSTRxBuffer[i];
@@ -586,6 +707,7 @@ int main(void)
                     {
                         if (ch <= '9') arrPotEnable[ch - '0'] = true;
                         else arrPotEnable[ch - 'A' + 10] = true;
+                        enableAD = true;
                     }
                     i++;
                 } while(i < MAXPOTS);
@@ -831,10 +953,8 @@ static void InitializeSystem(void)
 #endif
 
     UserInit();
-
-    USBDeviceInit(); //usb_device.c.  Initializes USB module SFRs and firmware
-    //variables to known states.
-}//end InitializeSystem
+    USBDeviceInit();  // Initializes USB module SFRs and firmware variables to known states.
+}
 
 // TEN ANALOG INPUTS: B0,B1,B3,B4,B5,B8,B9,B10,B11,B12
 int ADC10_ManualInit(void)
@@ -1226,6 +1346,12 @@ void UserInit(void)
     INTEnable(DMX_RX_INT, INT_ENABLED);
     INTSetVectorPriority(INT_VECTOR_UART(DMXuart), INT_PRIORITY_LEVEL_2);
     INTSetVectorSubPriority(INT_VECTOR_UART(DMXuart), INT_SUB_PRIORITY_LEVEL_0);    
+
+    // Set up Port A outputs:
+    PORTSetPinsDigitalIn(IOPORT_A, BIT_14 | BIT_15);
+    
+    // Set up Port A outputs:
+    PORTSetPinsDigitalOut(IOPORT_A, BIT_5);
     
     // Set up Port D outputs:
     PORTSetPinsDigitalOut(IOPORT_D, BIT_2);
@@ -1337,6 +1463,7 @@ BYTE ProcessUSB(void)
         // If incoming USB MIDI data isn't intended for robots, 
         // assume it is for other MIDI devices such the keyboard.
         // So copy the data and send it out the MIDI Uart: 
+        
         /*
         if (MIDIcommand == 0x80 || MIDIcommand == 0x90)
         {            
@@ -1367,8 +1494,9 @@ BYTE ProcessUSB(void)
             return true; // Return true to indicate USB is active
         }        
         */
+        
         // MIDI commands are for DMX lamp control:
-        if (MIDIcommand == (DMX_CHANNEL-1))
+        if (MIDIcommand == (DMXchannel-1) && DMXenable)
         {
             if (0 == (ReceivedDataBuffer[3] & 0b01000000)) lowDMXLamp = (unsigned short)ReceivedDataBuffer[3];
             else {
@@ -1389,7 +1517,7 @@ BYTE ProcessUSB(void)
             }
         }                  
         // Assume 0xB MIDI commands are for servo control:
-        else if (MIDIcommand == SERVO_CHANNEL-1)
+        else if (MIDIcommand == SERVOchannel-1)
         {
             if (0 == (ReceivedDataBuffer[3] & 0b01000000)) lowServoByte = (unsigned short)ReceivedDataBuffer[3];
             else {
@@ -1482,17 +1610,12 @@ BYTE                    ch, dummy;
 				dummyCounter++;			
 			else if (DMXRxPtr<DMXLENGTH)
             {	
-				DMXRxBuffer[DMXRxPtr]=ch;			 
-				DMXRxPtr++;
+                DMXRxBuffer[DMXRxPtr]=ch;			 
+                DMXRxPtr++;
 				if (DMXRxPtr==DMXLENGTH)
-                {
-					// DMXflag=true;					
-                    DMXDataCounter++;
-                    if (DMXDataCounter >= 5)
-                    {
-                        DMXDataCounter = 0;
-                        DMXflag = true; 
-                    }
+                {		
+                    DMXenable = true;
+                    DMXdataReceived = true;
 				}					
 			}	
 		}			
@@ -1518,6 +1641,71 @@ BYTE                    ch, dummy;
     }
 }
 
+
+BYTE WriteConfigByte(unsigned short address, BYTE DataByte)
+{
+    BYTE result;    
+    result = EepromWriteByte(I2C_BUS, EEPROM_ID, address, DataByte);
+    DelayMs(10);        
+    if (result) return true;
+    else return false;
+}
+
+BYTE ReadConfigByte(unsigned short address, BYTE *ptrDataByte)
+{
+BYTE result;
+    result = EepromReadByte(I2C_BUS, EEPROM_ID, address, ptrDataByte);    
+    if (result) return true;
+    return false;
+}
+
+BYTE CheckConfig()
+{
+BYTE TestByte1, TestByte2, TestByte3;
+    printf("\rCHECKING config bytes...");
+    if (!ReadConfigByte(TEST_ADDRESS_1, &TestByte1)) return false;
+    if (!ReadConfigByte(TEST_ADDRESS_2, &TestByte2)) return false;
+    if (!ReadConfigByte(TEST_ADDRESS_3, &TestByte3)) return false;
+    if (TestByte1 != TEST_BYTE_1 || TestByte2 != TEST_BYTE_2 || TestByte3 != TEST_BYTE_3)
+    {    
+        if (!WriteConfig()) return false;
+        if (!WriteConfigByte (TEST_ADDRESS_1, TEST_BYTE_1)) return false;
+        if (!WriteConfigByte (TEST_ADDRESS_2, TEST_BYTE_2)) return false;
+        if (!WriteConfigByte (TEST_ADDRESS_3, TEST_BYTE_3)) return false;
+        printf("\rCHECK FACTORY CONFIG WRITTEN");        
+    }
+    else printf("\rConfig bytes OK.");
+    if (ReadConfig()) 
+    {
+        printf("\rConfig bytes read.");
+        return true;
+    }
+    else
+    {
+        printf("\rCHECK CONFIG BYTE READ ERROR");
+        return false;
+    }
+}
+
+BYTE WriteConfig()
+{
+    if (!WriteConfigByte(XBEE_ADDRESS, XBEEonly)) return false;
+    if (!WriteConfigByte(DMX_ADDRESS, DMXenable)) return false;
+    if (!WriteConfigByte(DIAGNOSTICS_ADDRESS, DiagnosticsEnable)) return false;
+    if (!WriteConfigByte(DMX_CHANNEL_ADDRESS, DMXchannel)) return false;
+    if (!WriteConfigByte(SERVO_CHANNEL_ADDRESS, SERVOchannel)) return false;
+    return true;
+}
+
+BYTE ReadConfig()
+{
+    if (!ReadConfigByte(XBEE_ADDRESS, &XBEEonly)) return false;
+    if (!ReadConfigByte(DMX_ADDRESS, &DMXenable)) return false;
+    if (!ReadConfigByte(DIAGNOSTICS_ADDRESS, &DiagnosticsEnable)) return false;
+    if (!ReadConfigByte(DMX_CHANNEL_ADDRESS, &DMXchannel)) return false;
+    if (!ReadConfigByte(SERVO_CHANNEL_ADDRESS, &SERVOchannel)) return false;    
+    return true;
+}
 
 /** EOF main.c *************************************************/
 #endif
