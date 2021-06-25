@@ -173,7 +173,7 @@ ROM USB_DEVICE_DESCRIPTOR device_dsc=
     0x00,                   // Protocol code
     USB_EP0_BUFF_SIZE,          // Max packet size for EP0, see usb_config.h
     0x04D8,                 // Vendor ID
-    0x0063,                 // Product ID: Audio MIDI demo  For DEV 1: use 59; For DEV 2: use 62 DEV 3: 63  $$$$ 
+    0x0059,                 // Product ID: Audio MIDI demo  For DEV 1: use 59; For DEV 2: use 62 DEV 3: 63  DEV 4: 64$$$$ 
     0x0002,                 // Device release number in BCD format
     0x01,                   // Manufacturer string index
     0x02,                   // Product string index
@@ -321,7 +321,7 @@ sizeof(sd001),USB_DESCRIPTOR_STRING,
 //Product string descriptor
 ROM struct{BYTE bLength;BYTE bDscType;WORD string[12];}sd002={
 sizeof(sd002),USB_DESCRIPTOR_STRING,
-{'M','I','D','I',' ','I','O',' ','D','E','V','3'}};   // $$$$
+{'M','I','D','I',' ','I','O',' ','D','E','V','1'}};   // $$$$
 // {'M','I','D','I',' ','E','x','a','m','p','l','e'}};
 
 //Array of configuration descriptors

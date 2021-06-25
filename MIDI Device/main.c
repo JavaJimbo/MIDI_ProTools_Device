@@ -40,6 +40,10 @@
  * 1-8-21:      Tested DMX512 and servo control with XBEE - everything seems to work.
  * 1-9-21:      Added routine for writing configuration to EEprom.
  *              MIDI channels for DMX and SERVO are stored in EEprom and may be modified.
+ * 05-16-21;    
+ * 06-12-21:    Recompiled with Config EEPROM and DMX disabled. 
+ *              Works with ProTools and Brain Board with four servos.
+ * 06-25-21:    Recompiled again & saved to GitHub.
  ************************************************************************************************************/
 
 #ifndef MAIN_C
@@ -209,13 +213,13 @@ unsigned short ADpots[MAXPOTS];
 
 void ConfigAd(void);
 
-#define ENABLE_POTS 16
+#define ENABLE_POTS 16 // CTL-P
 #define SET_DISPLAY 4 // CTL-D
 #define SET_SERVO 19 // CTL-S
 #define SET_RECORD 18 // CTL-R
 #define SET_STANDBY 1 // CTL-A
 #define SET_SCALE 3 // CTL-C
-#define SET_PLAY 16 // CTL-P
+
 #define SET_PERCUSSION 5 // CTL-E
 #define SEND_NOTE_OFF_47 6 // CTL-F
 #define SEND_NOTE_OFF_48 7 // CTL-G
@@ -353,14 +357,16 @@ int main(void)
     }
         
     InitializeSystem();    
-    initI2C(I2C_BUS);
+    // initI2C(I2C_BUS);
     
     DelayMs(200);
     
     printf("\r\rMIDI CHANNEL TEST #0");
+    /*
     CheckConfig();
     printf("\r\rDMX Channel: %02X", DMXchannel);
     printf("\rSERVO Channel: %02X", SERVOchannel);      
+    */
     
     if (XBEEonly) printf("\rXBEE ONLY enabled");
     else printf("\rXBEE ONLY disabled");
@@ -428,6 +434,7 @@ int main(void)
         if (controlCommand)
         {
             printf("\rCONTROL COMMAND %d: ", controlCommand);
+            /*
             if (controlCommand == DMX_ENABLE)
             {
                 if (DMXenable)
@@ -466,7 +473,8 @@ int main(void)
                 }
                 else printf("\rERROR: Bad character: %c", Temp);               
             }            
-            else if (controlCommand == SET_SERVO_CHANNEL)
+            else */
+            if (controlCommand == SET_SERVO_CHANNEL)
             {
                 Temp = HOSTRxBuffer[0];
                 if (Temp >= 'A' && Temp <= 'F') 
