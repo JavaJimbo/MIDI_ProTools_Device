@@ -1,6 +1,10 @@
 /***********************************************************************************************************
- * PROJECT:     MIDI Demo
+ * PROJECT:     MIDI_ProTools
+ *              Formerly MIDI DEVICE
  * FileName:    main.c for PIC32MX795F512L on Sparkfun UBW32 Board
+ *              Compiled with XC V1.31 and MPLABX V5.45
+ *              Works with PIC795_MD13S_Controller
+ *              
  *              
  * 11-30-20:    Get both MIDI UART and USB working for recording and playing back using ProTools.
  *              Works well in USB mode with ProTools recording and playing.
@@ -44,6 +48,7 @@
  * 06-12-21:    Recompiled with Config EEPROM and DMX disabled. 
  *              Works with ProTools and Brain Board with four servos.
  * 06-25-21:    Recompiled again & saved to GitHub.
+ * 10-26-21:    Recompiled, renamed from MIDI DEVICE TO MIDI_ProTools
  ************************************************************************************************************/
 
 #ifndef MAIN_C
@@ -361,7 +366,7 @@ int main(void)
     
     DelayMs(200);
     
-    printf("\r\rMIDI CHANNEL TEST #0");
+    printf("\r\rMIDI ProTools START #0");
     /*
     CheckConfig();
     printf("\r\rDMX Channel: %02X", DMXchannel);
